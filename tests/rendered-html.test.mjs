@@ -34,12 +34,21 @@ test("server-renders the Blendroom experience and social metadata", async () => 
     html,
     /<h1[^>]*>Blend what(?:'|&#x27;)s fresh\.<\/h1>/i,
   );
-  assert.match(html, /Open the fridge, grab fruit/);
+  assert.match(html, /grab fruit, blend it, then drag the glass jug/);
   assert.match(html, /aria-label="Mute motor sound"/);
   assert.match(
     html,
     /aria-label="Clear the current batch and restock the fridge"/,
   );
+  assert.match(
+    html,
+    /Blend until smooth, then drag the glass jug to the crystal cup\./,
+  );
+  assert.match(
+    html,
+    /aria-label="Automatically pour the smoothie into the crystal cup"/,
+  );
+  assert.match(html, /aria-label="Crystal cup fill level"/);
   assert.match(
     html,
     /https:\/\/blendroom-3d-kitchen\.damiancc79\.chatgpt\.site\/og\.png/,
@@ -57,7 +66,15 @@ test("keeps the contained fluid simulation and preview asset in source", async (
   ]);
 
   assert.match(studio, /juice:\s*number/);
+  assert.match(studio, /poured:\s*number/);
   assert.match(studio, /function JuiceFluid\(/);
+  assert.match(studio, /function CrystalCup\(/);
+  assert.match(studio, /function PourStream\(/);
+  assert.match(studio, /CUP_CAPACITY\s*=\s*5/);
+  assert.match(studio, /POUR_RATE\s*=\s*1\.65/);
+  assert.match(studio, /setPointerCapture\(event\.pointerId\)/);
+  assert.match(studio, /remainingUnits=\{jarUnits\}/);
+  assert.match(studio, /frame\.rotation\.z\s*=\s*-tiltRef\.current/);
   assert.match(studio, /function Fridge\(/);
   assert.match(studio, /function freshFridgeFruit\(/);
   assert.match(studio, /Fridge closed\. Five fresh fruits generated inside\./);

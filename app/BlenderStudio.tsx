@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MutableRefObject,
 } from "react";
 import * as THREE from "three";
 
@@ -33,7 +34,16 @@ type FruitItem = {
   inFridge: boolean;
   phase: number;
   juice: number;
+  poured: number;
 };
+
+type ServeMode =
+  | "docked"
+  | "dragging"
+  | "pouring"
+  | "auto-pouring"
+  | "returning"
+  | "served";
 
 type FruitDefinition = {
   type: FruitType;
@@ -63,6 +73,10 @@ const FRUIT_COLORS = Object.fromEntries(
 ) as Record<FruitType, string>;
 
 const BLENDER_X = 0.45;
+const CUP_POSITION = new THREE.Vector3(2.35, 0.08, 0.22);
+const CUP_RIM_Y = 1.15;
+const CUP_CAPACITY = 5;
+const POUR_RATE = 1.65;
 const FRIDGE_X = -4.15;
 const FRIDGE_Z = -2.2;
 const MAX_FRUIT = 12;
@@ -121,6 +135,7 @@ function freshFridgeFruit(
     inFridge: true,
     phase: id * 1.71,
     juice: 0,
+    poured: 0,
   };
 }
 
@@ -148,15 +163,23 @@ function reflowBoard(fruits: FruitItem[]) {
   );
 }
 
-function smoothieColor(fruits: FruitItem[]) {
-  const inside = fruits.filter((fruit) => fruit.inJar && fruit.juice > 0);
-  const totalJuice = inside.reduce((sum, fruit) => sum + fruit.juice, 0);
+function smoothieColor(
+  fruits: FruitItem[],
+  amount: (fruit: FruitItem) => number = (fruit) => fruit.juice,
+) {
+  const inside = fruits.filter(
+    (fruit) => fruit.inJar && amount(fruit) > 0.0001,
+  );
+  const totalJuice = inside.reduce(
+    (sum, fruit) => sum + amount(fruit),
+    0,
+  );
   if (!totalJuice) return "#e9895c";
 
   const color = new THREE.Color(0, 0, 0);
   inside.forEach((fruit) =>
     color.add(
-      new THREE.Color(FRUIT_COLORS[fruit.type]).multiplyScalar(fruit.juice),
+      new THREE.Color(FRUIT_COLORS[fruit.type]).multiplyScalar(amount(fruit)),
     ),
   );
   color.multiplyScalar(1 / totalJuice);
@@ -174,6 +197,7 @@ export default function BlenderStudio() {
   const [blenderSize, setBlenderSize] = useState(1);
   const [blending, setBlending] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [serveMode, setServeMode] = useState<ServeMode>("docked");
   const [muted, setMuted] = useState(false);
   const [liveMessage, setLiveMessage] = useState(
     "Open the fridge to choose fresh fruit.",
@@ -190,7 +214,38 @@ export default function BlenderStudio() {
     : 0;
   const blendComplete =
     insideCount > 0 && insideFruits.every((fruit) => fruit.juice >= 0.995);
-  const color = useMemo(() => smoothieColor(fruits), [fruits]);
+  const producedUnits = insideFruits.reduce(
+    (sum, fruit) => sum + fruit.juice,
+    0,
+  );
+  const cupUnits = insideFruits.reduce(
+    (sum, fruit) => sum + fruit.poured,
+    0,
+  );
+  const jarUnits = Math.max(0, producedUnits - cupUnits);
+  const cupFraction = THREE.MathUtils.clamp(cupUnits / CUP_CAPACITY, 0, 1);
+  const jarColor = useMemo(
+    () =>
+      smoothieColor(fruits, (fruit) =>
+        Math.max(0, fruit.juice - fruit.poured),
+      ),
+    [fruits],
+  );
+  const cupColor = useMemo(
+    () => smoothieColor(fruits, (fruit) => fruit.poured),
+    [fruits],
+  );
+  const canServe =
+    blendComplete &&
+    !blending &&
+    jarUnits > 0.01 &&
+    cupUnits < CUP_CAPACITY - 0.01;
+  const pouring =
+    serveMode === "pouring" || serveMode === "auto-pouring";
+  const servingActive =
+    serveMode === "dragging" || pouring || serveMode === "returning";
+  const sceneLocked = dragging || servingActive;
+  const batchLocked = servingActive || cupUnits > 0.001;
   const sizeIndex = BLENDER_SIZES.reduce(
     (closest, option, index) =>
       Math.abs(option.value - blenderSize) <
@@ -218,7 +273,7 @@ export default function BlenderStudio() {
           completionScheduled.current = true;
           window.setTimeout(() => {
             setBlending(false);
-            setLiveMessage("Smoothie complete. Silky smooth.");
+            setLiveMessage("Smoothie complete. Drag the glass jug to the cup.");
           }, 0);
         }
         return next;
@@ -229,7 +284,16 @@ export default function BlenderStudio() {
 
   useEffect(() => {
     const stopWhenHidden = () => {
-      if (document.hidden) setBlending(false);
+      if (!document.hidden) return;
+      setBlending(false);
+      setDragging(false);
+      setServeMode((current) =>
+        current === "dragging" ||
+        current === "pouring" ||
+        current === "auto-pouring"
+          ? "returning"
+          : current,
+      );
     };
     document.addEventListener("visibilitychange", stopWhenHidden);
     return () =>
@@ -279,9 +343,120 @@ export default function BlenderStudio() {
     };
   }, [blending, muted]);
 
+  const transferJuice = useCallback((requested: number) => {
+    setFruits((current) => {
+      const active = current.filter((fruit) => fruit.inJar);
+      const currentCup = active.reduce(
+        (sum, fruit) => sum + fruit.poured,
+        0,
+      );
+      const remaining = active.reduce(
+        (sum, fruit) => sum + Math.max(0, fruit.juice - fruit.poured),
+        0,
+      );
+      const accepted = Math.min(
+        requested,
+        remaining,
+        Math.max(0, CUP_CAPACITY - currentCup),
+      );
+      if (accepted <= 0.0001 || remaining <= 0.0001) return current;
+
+      return current.map((fruit) => {
+        if (!fruit.inJar) return fruit;
+        const fruitRemaining = Math.max(0, fruit.juice - fruit.poured);
+        if (fruitRemaining <= 0) return fruit;
+        const share = fruitRemaining / remaining;
+        return {
+          ...fruit,
+          poured: Math.min(
+            fruit.juice,
+            fruit.poured + accepted * share,
+          ),
+        };
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!pouring) return;
+
+    let interval = 0;
+    const delay = window.setTimeout(
+      () => {
+        interval = window.setInterval(
+          () => transferJuice(POUR_RATE * 0.05),
+          50,
+        );
+      },
+      reducedMotion ? 0 : 280,
+    );
+
+    return () => {
+      window.clearTimeout(delay);
+      if (interval) window.clearInterval(interval);
+    };
+  }, [pouring, reducedMotion, transferJuice]);
+
+  useEffect(() => {
+    if (!pouring || canServe) return;
+    const timer = window.setTimeout(() => {
+      setServeMode("returning");
+      setDragging(false);
+      setLiveMessage(
+        cupUnits >= CUP_CAPACITY - 0.01
+          ? "Crystal cup filled. The remaining smoothie stays in the jug."
+          : "Smoothie served. The jug is empty.",
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [canServe, cupUnits, pouring]);
+
+  useEffect(() => {
+    const returnJug = (message: string) => {
+      if (!servingActive) return;
+      setServeMode("returning");
+      setDragging(false);
+      setLiveMessage(message);
+    };
+    const cancelServing = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      returnJug("Serving canceled. Jug returning to the blender.");
+    };
+    const returnOnBlur = () =>
+      returnJug("Serving paused. Jug returning to the blender.");
+    window.addEventListener("keydown", cancelServing);
+    window.addEventListener("blur", returnOnBlur);
+    return () => {
+      window.removeEventListener("keydown", cancelServing);
+      window.removeEventListener("blur", returnOnBlur);
+    };
+  }, [servingActive]);
+
+  const beginAutoServe = useCallback(() => {
+    if (servingActive) {
+      setLiveMessage("Finish the current serving gesture first.");
+      return;
+    }
+    if (!canServe) {
+      setLiveMessage(
+        blendComplete
+          ? "The cup or jug has no room left. Clear the batch to start again."
+          : "Blend the fruit until smooth before serving.",
+      );
+      return;
+    }
+    setServeMode("auto-pouring");
+    setDragging(false);
+    setLiveMessage("Jug moving into place. Pouring into the crystal cup.");
+  }, [blendComplete, canServe, servingActive]);
+
   const toggleFridge = useCallback(() => {
-    if (dragging) {
-      setLiveMessage("Finish placing the fruit before closing the fridge.");
+    if (sceneLocked || cupUnits > 0.001) {
+      setLiveMessage(
+        sceneLocked
+          ? "Finish serving before using the fridge."
+          : "Clear the served smoothie before starting a new batch.",
+      );
       return;
     }
 
@@ -300,7 +475,7 @@ export default function BlenderStudio() {
     setLiveMessage(
       "Fridge closed. Five fresh fruits generated inside.",
     );
-  }, [dragging, fridgeOpen, fruits]);
+  }, [cupUnits, fridgeOpen, fruits, sceneLocked]);
 
   const dropFruit = useCallback(
     (
@@ -308,6 +483,10 @@ export default function BlenderStudio() {
       position: [number, number, number],
       droppedOverJar: boolean,
     ) => {
+      if (batchLocked) {
+        setLiveMessage("Clear the served smoothie before adding more fruit.");
+        return;
+      }
       const draggedFruit = fruits.find((fruit) => fruit.id === id);
       const activeFruitCount = fruits.filter(
         (fruit) => fruit.id !== id && !fruit.inFridge,
@@ -388,11 +567,11 @@ export default function BlenderStudio() {
         setLiveMessage("Fruit returned to the cutting board.");
       }
     },
-    [blenderSize, fruits],
+    [batchLocked, blenderSize, fruits],
   );
 
   const moveBoardFruitToJug = useCallback(() => {
-    if (blending) return;
+    if (blending || batchLocked || sceneLocked) return;
     setFruits((current) => {
       const target = current.find(
         (fruit) =>
@@ -413,10 +592,18 @@ export default function BlenderStudio() {
       return reflowBoard(next);
     });
     setLiveMessage("One fruit moved into the jug. Ready to whirl.");
-  }, [blenderSize, blending, fridgeOpen]);
+  }, [batchLocked, blenderSize, blending, fridgeOpen, sceneLocked]);
 
   const resizeBlender = useCallback(
     (nextSize: number) => {
+      if (batchLocked || sceneLocked) {
+        setLiveMessage(
+          sceneLocked
+            ? "Finish the current interaction before resizing."
+            : "Return and clear the served batch before resizing.",
+        );
+        return;
+      }
       const clamped = Math.min(1.3, Math.max(0.78, nextSize));
       const ratio = clamped / blenderSize;
       setFruits((current) =>
@@ -436,7 +623,7 @@ export default function BlenderStudio() {
       setBlenderSize(clamped);
       setLiveMessage(`Blender size set to ${clamped.toFixed(2)} times.`);
     },
-    [blenderSize],
+    [batchLocked, blenderSize, sceneLocked],
   );
 
   const stepBlenderSize = useCallback(
@@ -452,6 +639,14 @@ export default function BlenderStudio() {
   );
 
   const toggleBlend = () => {
+    if (sceneLocked || cupUnits > 0.001) {
+      setLiveMessage(
+        sceneLocked
+          ? "Finish the current interaction before using the blender."
+          : "The smoothie has been served. Clear the batch to blend again.",
+      );
+      return;
+    }
     if (!insideCount) {
       setLiveMessage("Open the fridge and drop at least one fruit into the jug.");
       return;
@@ -469,6 +664,8 @@ export default function BlenderStudio() {
 
   const reset = () => {
     setBlending(false);
+    setDragging(false);
+    setServeMode("docked");
     const fresh = FRUIT.map((fruit, index) =>
       freshFridgeFruit(nextId.current++, fruit.type, index),
     );
@@ -477,26 +674,63 @@ export default function BlenderStudio() {
     setLiveMessage("Batch cleared. Five fresh fruits generated in the fridge.");
   };
 
+  const handleServeModeChange = useCallback((mode: ServeMode) => {
+    setServeMode(mode);
+    if (mode === "dragging") {
+      setLiveMessage("Jug picked up. Drag it over the glowing crystal cup.");
+    } else if (mode === "pouring") {
+      setLiveMessage("Hold over the cup to pour. Move away to pause.");
+    } else if (mode === "returning") {
+      setLiveMessage("Jug returning to the blender.");
+    }
+  }, []);
+
+  const finishJugReturn = useCallback(() => {
+    setServeMode(canServe ? "docked" : cupUnits > 0.001 ? "served" : "docked");
+    setDragging(false);
+  }, [canServe, cupUnits]);
+
   const phaseLabel =
-    blendProgress >= 0.98
+    pouring ? "Pouring smoothie"
+    : serveMode === "dragging" ? "Carry jug to cup"
+    : serveMode === "returning" ? "Jug returning"
+    : serveMode === "served" ?
+      cupUnits >= CUP_CAPACITY - 0.01 ? "Crystal cup full"
+      : "Smoothie served"
+    : blendProgress >= 0.98
       ? "Silky smooth"
-      : blending && blendProgress > 0.62
-        ? "Fluid vortex"
-        : blending && blendProgress > 0.24
-          ? "Juice releasing"
-        : blending
-          ? "Crushing fruit"
-          : blendProgress > 0.02
-            ? "Partly blended"
-          : insideCount
-            ? "Ready to whirl"
-            : "Waiting for fruit";
+    : blending && blendProgress > 0.62 ? "Fluid vortex"
+    : blending && blendProgress > 0.24 ? "Juice releasing"
+    : blending ? "Crushing fruit"
+    : blendProgress > 0.02 ? "Partly blended"
+    : insideCount ? "Ready to whirl"
+    : "Waiting for fruit";
+  const statusProgress =
+    cupUnits > 0.001 || servingActive ? cupFraction : blendProgress;
+  const serveLabel = pouring
+    ? `Pouring · ${Math.round(cupFraction * 100)}%`
+    : serveMode === "dragging"
+      ? "Hold the jug over the cup"
+      : cupUnits >= CUP_CAPACITY - 0.01
+        ? "Crystal cup filled"
+        : jarUnits <= 0.01 && cupUnits > 0
+          ? "Smoothie served"
+          : canServe
+            ? "Drag the jug to the cup"
+            : "Blend until silky smooth";
+  const serveButtonLabel = pouring
+    ? "Pouring…"
+    : cupUnits >= CUP_CAPACITY - 0.01
+      ? "Cup filled"
+      : jarUnits <= 0.01 && cupUnits > 0
+        ? "Jug empty"
+        : "Pour for me";
 
   return (
     <main className="studio-shell">
       <div
-        className={`canvas-wrap ${dragging ? "is-dragging" : ""}`}
-        aria-label="Interactive 3D kitchen with a blender"
+        className={`canvas-wrap ${sceneLocked ? "is-dragging" : ""}`}
+        aria-label="Interactive 3D kitchen with a fruit blender and crystal serving cup"
       >
         <Canvas
           shadows
@@ -518,10 +752,17 @@ export default function BlenderStudio() {
               blending={blending}
               blendProgress={blendProgress}
               blendComplete={blendComplete}
-              smoothieColor={color}
+              smoothieColor={jarColor}
+              cupColor={cupColor}
+              jarUnits={jarUnits}
+              cupUnits={cupUnits}
+              cupFraction={cupFraction}
+              canServe={canServe}
+              serveMode={serveMode}
+              batchLocked={batchLocked}
               fridgeOpen={fridgeOpen}
               fridgeCount={fridgeCount}
-              dragging={dragging}
+              dragging={sceneLocked}
               reducedMotion={reducedMotion}
               onDragging={setDragging}
               onFruitDrop={dropFruit}
@@ -529,6 +770,9 @@ export default function BlenderStudio() {
               onQuickAdd={moveBoardFruitToJug}
               onBlend={toggleBlend}
               onSizeStep={stepBlenderSize}
+              onServeModeChange={handleServeModeChange}
+              onReturnComplete={finishJugReturn}
+              onAutoServe={beginAutoServe}
             />
           </Suspense>
         </Canvas>
@@ -542,16 +786,20 @@ export default function BlenderStudio() {
           BLENDROOM · KITCHEN LAB
         </div>
         <h1 id="studio-title">Blend what&apos;s fresh.</h1>
-        <p>Open the fridge, grab fruit, then press the red button.</p>
+        <p>Blend until smooth, then drag the glass jug to the crystal cup.</p>
       </header>
 
-      <aside className={`utility-pill ${blending ? "is-live" : ""}`}>
+      <aside
+        className={`utility-pill ${blending || pouring ? "is-live" : ""}`}
+      >
         <span className="status-dot" aria-hidden="true" />
         <div className="status-copy">
-          <span>{blending ? "Motor running" : "Kitchen status"}</span>
+          <span>
+            {blending ? "Motor running" : pouring ? "Serving now" : "Kitchen status"}
+          </span>
           <strong>
             {phaseLabel}
-            <em>{Math.round(blendProgress * 100)}%</em>
+            <em>{Math.round(statusProgress * 100)}%</em>
           </strong>
         </div>
         <button
@@ -567,11 +815,39 @@ export default function BlenderStudio() {
           className="utility-button clear-button"
           type="button"
           onClick={reset}
-          disabled={!insideCount && !onBoardCount}
+          disabled={!insideCount && !onBoardCount && cupUnits <= 0.001}
           aria-label="Clear the current batch and restock the fridge"
           title="Fresh batch"
         >
           ↺
+        </button>
+      </aside>
+
+      <aside
+        className={`serve-panel ${canServe ? "is-ready" : ""} ${
+          pouring ? "is-pouring" : ""
+        }`}
+        aria-labelledby="serve-title"
+      >
+        <div className="serve-cup-glyph" aria-hidden="true">
+          <span style={{ height: `${Math.max(5, cupFraction * 82)}%` }} />
+        </div>
+        <div className="serve-copy">
+          <small id="serve-title">Crystal serve</small>
+          <strong>{serveLabel}</strong>
+          <progress
+            value={cupUnits}
+            max={CUP_CAPACITY}
+            aria-label="Crystal cup fill level"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={beginAutoServe}
+          disabled={!canServe || servingActive}
+          aria-label="Automatically pour the smoothie into the crystal cup"
+        >
+          {serveButtonLabel}
         </button>
       </aside>
 
@@ -591,6 +867,13 @@ type SceneProps = {
   blendProgress: number;
   blendComplete: boolean;
   smoothieColor: string;
+  cupColor: string;
+  jarUnits: number;
+  cupUnits: number;
+  cupFraction: number;
+  canServe: boolean;
+  serveMode: ServeMode;
+  batchLocked: boolean;
   fridgeOpen: boolean;
   fridgeCount: number;
   dragging: boolean;
@@ -605,6 +888,9 @@ type SceneProps = {
   onQuickAdd: () => void;
   onBlend: () => void;
   onSizeStep: (direction: -1 | 1) => void;
+  onServeModeChange: (mode: ServeMode) => void;
+  onReturnComplete: () => void;
+  onAutoServe: () => void;
 };
 
 function BlendroomScene({
@@ -616,6 +902,13 @@ function BlendroomScene({
   blendProgress,
   blendComplete,
   smoothieColor: color,
+  cupColor,
+  jarUnits,
+  cupUnits,
+  cupFraction,
+  canServe,
+  serveMode,
+  batchLocked,
   fridgeOpen,
   fridgeCount,
   dragging,
@@ -626,13 +919,23 @@ function BlendroomScene({
   onQuickAdd,
   onBlend,
   onSizeStep,
+  onServeModeChange,
+  onReturnComplete,
+  onAutoServe,
 }: SceneProps) {
   const compact = useThree((state) => state.size.width < 880);
+  const spoutWorldRef = useRef(
+    new THREE.Vector3(BLENDER_X, 3.06 * blenderSize, 0),
+  );
+  const streamFlowRef = useRef(0);
   const activeFruitCount = fruits.filter((fruit) => !fruit.inFridge).length;
-  const canTakeFromFridge = activeFruitCount < MAX_FRUIT;
+  const canTakeFromFridge =
+    !dragging && !batchLocked && activeFruitCount < MAX_FRUIT;
   const canQuickAdd =
-    fruits.some((fruit) => !fruit.inJar && !fruit.inFridge) ||
-    (fridgeOpen && fridgeCount > 0 && canTakeFromFridge);
+    !dragging &&
+    !batchLocked &&
+    (fruits.some((fruit) => !fruit.inJar && !fruit.inFridge) ||
+      (fridgeOpen && fridgeCount > 0 && canTakeFromFridge));
   const juiceSources = useMemo(
     () =>
       fruits
@@ -677,7 +980,7 @@ function BlendroomScene({
       <Fridge
         open={fridgeOpen}
         stockCount={fridgeCount}
-        blending={blending}
+        blending={blending || batchLocked || dragging}
         canTakeFruit={canTakeFromFridge}
         canQuickAdd={canQuickAdd}
         reducedMotion={reducedMotion}
@@ -692,11 +995,37 @@ function BlendroomScene({
         blendProgress={blendProgress}
         blendComplete={blendComplete}
         smoothieColor={color}
+        jarUnits={jarUnits}
+        canServe={canServe}
+        serveMode={serveMode}
         fruitCount={fruits.filter((fruit) => fruit.inJar).length}
         juiceSources={juiceSources}
         reducedMotion={reducedMotion}
+        controlsLocked={batchLocked || dragging}
+        spoutWorldRef={spoutWorldRef}
+        streamFlowRef={streamFlowRef}
         onBlend={onBlend}
         onSizeStep={onSizeStep}
+        onDragging={onDragging}
+        onServeModeChange={onServeModeChange}
+        onReturnComplete={onReturnComplete}
+      />
+      <CrystalCup
+        color={cupColor}
+        fillFraction={cupFraction}
+        units={cupUnits}
+        canServe={canServe}
+        serveMode={serveMode}
+        reducedMotion={reducedMotion}
+        streamFlowRef={streamFlowRef}
+        onAutoServe={onAutoServe}
+      />
+      <PourStream
+        color={cupUnits > 0.001 ? cupColor : color}
+        fillFraction={cupFraction}
+        spoutWorldRef={spoutWorldRef}
+        flowRef={streamFlowRef}
+        reducedMotion={reducedMotion}
       />
 
       {fruits.map((fruit) => (
@@ -706,7 +1035,11 @@ function BlendroomScene({
           blenderSize={blenderSize}
           blending={blending}
           fridgeOpen={fridgeOpen}
-          disabled={dragging || (fruit.inFridge && !canTakeFromFridge)}
+          disabled={
+            dragging ||
+            batchLocked ||
+            (fruit.inFridge && !canTakeFromFridge)
+          }
           reducedMotion={reducedMotion}
           onDragging={onDragging}
           onDrop={onFruitDrop}
@@ -1226,11 +1559,13 @@ function BlenderPowerButton({
   blending,
   ready,
   complete,
+  disabled,
   onPress,
 }: {
   blending: boolean;
   ready: boolean;
   complete: boolean;
+  disabled: boolean;
   onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -1259,12 +1594,13 @@ function BlenderPowerButton({
         castShadow
         onClick={(event) => {
           event.stopPropagation();
+          if (disabled) return;
           onPress();
         }}
         onPointerDown={(event) => event.stopPropagation()}
         onPointerOver={(event) => {
           event.stopPropagation();
-          setHovered(true);
+          if (!disabled) setHovered(true);
         }}
         onPointerOut={() => setHovered(false)}
         scale={hovered ? 1.06 : 1}
@@ -1301,8 +1637,11 @@ function BlenderPowerButton({
             onPress();
           }}
           onPointerDown={(event) => event.stopPropagation()}
+          disabled={disabled}
           aria-label={
-            blending
+            disabled
+              ? "Blender controls unavailable during the current interaction"
+              : blending
               ? "Stop blender"
               : complete
                 ? "Smoothie is complete"
@@ -1327,11 +1666,20 @@ function BlenderRig({
   blendProgress,
   blendComplete,
   smoothieColor: color,
+  jarUnits,
+  canServe,
+  serveMode,
   fruitCount,
   juiceSources,
   reducedMotion,
+  controlsLocked,
+  spoutWorldRef,
+  streamFlowRef,
   onBlend,
   onSizeStep,
+  onDragging,
+  onServeModeChange,
+  onReturnComplete,
 }: {
   size: number;
   sizeIndex: number;
@@ -1340,16 +1688,60 @@ function BlenderRig({
   blendProgress: number;
   blendComplete: boolean;
   smoothieColor: string;
+  jarUnits: number;
+  canServe: boolean;
+  serveMode: ServeMode;
   fruitCount: number;
   juiceSources: JuiceSource[];
   reducedMotion: boolean;
+  controlsLocked: boolean;
+  spoutWorldRef: MutableRefObject<THREE.Vector3>;
+  streamFlowRef: MutableRefObject<number>;
   onBlend: () => void;
   onSizeStep: (direction: -1 | 1) => void;
+  onDragging: (dragging: boolean) => void;
+  onServeModeChange: (mode: ServeMode) => void;
+  onReturnComplete: () => void;
 }) {
   const group = useRef<THREE.Group>(null);
+  const jugCarrier = useRef<THREE.Group>(null);
+  const tiltPivot = useRef<THREE.Group>(null);
+  const jugTiltRef = useRef(0);
+  const spoutAnchor = useRef<THREE.Object3D>(null);
   const blade = useRef<THREE.Group>(null);
   const lid = useRef<THREE.Group>(null);
   const rpm = useRef(0);
+  const activePointer = useRef<number | null>(null);
+  const locallyDragging = useRef(false);
+  const overCup = useRef(false);
+  const returnNotified = useRef(false);
+  const dragPlane = useRef(
+    new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
+  );
+  const dragStartHit = useRef(new THREE.Vector3());
+  const dragStartPosition = useRef(new THREE.Vector3());
+  const dragTarget = useRef(new THREE.Vector3());
+  const [hovered, setHovered] = useState(false);
+  const pourAngle = -0.96;
+  const pivot = useMemo(() => new THREE.Vector3(0.88, 2.28, 0), []);
+  const spout = useMemo(() => new THREE.Vector3(0.84, 3.06, 0), []);
+  const cupMouth = useMemo(
+    () => new THREE.Vector3(CUP_POSITION.x, CUP_RIM_Y, CUP_POSITION.z),
+    [],
+  );
+  const pourPosition = useMemo(() => {
+    const transformedSpout = spout
+      .clone()
+      .sub(pivot)
+      .applyAxisAngle(new THREE.Vector3(0, 0, 1), pourAngle)
+      .add(pivot);
+    const desiredSpoutY = CUP_RIM_Y + 1.02;
+    return new THREE.Vector3(
+      (CUP_POSITION.x - BLENDER_X) / size - transformedSpout.x,
+      desiredSpoutY / size - transformedSpout.y,
+      CUP_POSITION.z / size - transformedSpout.z,
+    );
+  }, [pivot, pourAngle, size, spout]);
 
   const jarProfile = useMemo(
     () => [
@@ -1359,6 +1751,40 @@ function BlenderRig({
       new THREE.Vector2(0.82, 2.08),
     ],
     [],
+  );
+
+  useEffect(() => {
+    document.body.style.cursor =
+      hovered && canServe && serveMode === "docked" ? "grab" : "";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [canServe, hovered, serveMode]);
+
+  useEffect(() => {
+    if (
+      serveMode !== "returning" &&
+      serveMode !== "served" &&
+      serveMode !== "docked" &&
+      serveMode !== "auto-pouring"
+    ) {
+      return;
+    }
+    locallyDragging.current = false;
+    activePointer.current = null;
+    overCup.current = false;
+    if (serveMode !== "auto-pouring") onDragging(false);
+  }, [onDragging, serveMode]);
+
+  useEffect(
+    () => () => {
+      locallyDragging.current = false;
+      activePointer.current = null;
+      streamFlowRef.current = 0;
+      onDragging(false);
+      document.body.style.cursor = "";
+    },
+    [onDragging, streamFlowRef],
   );
 
   useFrame((state, delta) => {
@@ -1374,6 +1800,84 @@ function BlenderRig({
         blending && !reducedMotion
           ? Math.sin(state.clock.elapsedTime * 55) * 0.0045
           : 0;
+    }
+    if (jugCarrier.current && tiltPivot.current) {
+      const pouringPose =
+        serveMode === "pouring" || serveMode === "auto-pouring";
+      const targetPosition =
+        serveMode === "dragging" && locallyDragging.current
+          ? dragTarget.current
+          : pouringPose
+            ? pourPosition
+            : new THREE.Vector3();
+      const targetTilt = pouringPose
+        ? pourAngle
+        : serveMode === "dragging"
+          ? -0.08 *
+            THREE.MathUtils.clamp(dragTarget.current.x / 1.2, 0, 1)
+          : 0;
+      const speed = reducedMotion
+        ? 80
+        : serveMode === "dragging"
+          ? 18
+          : serveMode === "returning"
+            ? 7
+            : 8.5;
+
+      jugCarrier.current.position.x = THREE.MathUtils.damp(
+        jugCarrier.current.position.x,
+        targetPosition.x,
+        speed,
+        dt,
+      );
+      jugCarrier.current.position.y = THREE.MathUtils.damp(
+        jugCarrier.current.position.y,
+        targetPosition.y,
+        speed,
+        dt,
+      );
+      jugCarrier.current.position.z = THREE.MathUtils.damp(
+        jugCarrier.current.position.z,
+        targetPosition.z,
+        speed,
+        dt,
+      );
+      tiltPivot.current.rotation.z = THREE.MathUtils.damp(
+        tiltPivot.current.rotation.z,
+        targetTilt,
+        speed,
+        dt,
+      );
+      jugTiltRef.current = tiltPivot.current.rotation.z;
+
+      spoutAnchor.current?.updateWorldMatrix(true, false);
+      spoutAnchor.current?.getWorldPosition(spoutWorldRef.current);
+      const desiredFlow =
+        pouringPose && canServe
+          ? THREE.MathUtils.smoothstep(
+              Math.abs(tiltPivot.current.rotation.z),
+              0.5,
+              Math.abs(pourAngle),
+            )
+          : 0;
+      streamFlowRef.current = THREE.MathUtils.damp(
+        streamFlowRef.current,
+        desiredFlow,
+        reducedMotion ? 60 : 9,
+        dt,
+      );
+
+      if (serveMode === "returning") {
+        const home =
+          jugCarrier.current.position.length() < 0.018 &&
+          Math.abs(tiltPivot.current.rotation.z) < 0.018;
+        if (home && !returnNotified.current) {
+          returnNotified.current = true;
+          onReturnComplete();
+        }
+      } else {
+        returnNotified.current = false;
+      }
     }
     if (lid.current) {
       const targetX = blending ? 0 : reducedMotion ? 0.28 : 0.72;
@@ -1400,6 +1904,90 @@ function BlenderRig({
     }
   });
 
+  const pointerTarget = (event: ThreeEvent<PointerEvent>) =>
+    event.target as unknown as {
+      setPointerCapture: (pointerId: number) => void;
+      releasePointerCapture: (pointerId: number) => void;
+    };
+
+  const startJugDrag = (event: ThreeEvent<PointerEvent>) => {
+    if (!canServe || locallyDragging.current || !jugCarrier.current) return;
+    event.stopPropagation();
+    locallyDragging.current = true;
+    activePointer.current = event.pointerId;
+    overCup.current = false;
+    pointerTarget(event).setPointerCapture(event.pointerId);
+    dragPlane.current.setFromNormalAndCoplanarPoint(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(0, 0, 0),
+    );
+    const hit = new THREE.Vector3();
+    if (event.ray.intersectPlane(dragPlane.current, hit)) {
+      dragStartHit.current.copy(hit);
+    }
+    dragStartPosition.current.copy(jugCarrier.current.position);
+    dragTarget.current.copy(jugCarrier.current.position);
+    onDragging(true);
+    onServeModeChange("dragging");
+    document.body.style.cursor = "grabbing";
+  };
+
+  const moveJug = (event: ThreeEvent<PointerEvent>) => {
+    if (
+      !locallyDragging.current ||
+      activePointer.current !== event.pointerId
+    ) {
+      return;
+    }
+    event.stopPropagation();
+    const hit = new THREE.Vector3();
+    if (!event.ray.intersectPlane(dragPlane.current, hit)) return;
+    const delta = hit.sub(dragStartHit.current).multiplyScalar(1 / size);
+    dragTarget.current.copy(dragStartPosition.current).add(delta);
+    dragTarget.current.x = THREE.MathUtils.clamp(
+      dragTarget.current.x,
+      -0.25,
+      1.75,
+    );
+    dragTarget.current.y = THREE.MathUtils.clamp(
+      dragTarget.current.y,
+      -0.12,
+      1.15,
+    );
+    dragTarget.current.z = THREE.MathUtils.clamp(
+      dragTarget.current.z,
+      -0.28,
+      0.28,
+    );
+
+    const inCupZone = event.ray.distanceToPoint(cupMouth) < 0.86;
+    if (inCupZone !== overCup.current) {
+      overCup.current = inCupZone;
+      onServeModeChange(inCupZone ? "pouring" : "dragging");
+    }
+  };
+
+  const finishJugDrag = (event: ThreeEvent<PointerEvent>) => {
+    if (
+      !locallyDragging.current ||
+      activePointer.current !== event.pointerId
+    ) {
+      return;
+    }
+    event.stopPropagation();
+    locallyDragging.current = false;
+    activePointer.current = null;
+    overCup.current = false;
+    try {
+      pointerTarget(event).releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be gone after a browser-level cancel.
+    }
+    document.body.style.cursor = hovered ? "grab" : "";
+    onDragging(false);
+    onServeModeChange("returning");
+  };
+
   return (
     <group ref={group} scale={size}>
       <group>
@@ -1423,8 +2011,9 @@ function BlenderRig({
         </mesh>
         <BlenderPowerButton
           blending={blending}
-          ready={fruitCount > 0 && !blendComplete}
+          ready={fruitCount > 0 && !blendComplete && !controlsLocked}
           complete={blendComplete}
+          disabled={controlsLocked}
           onPress={onBlend}
         />
         <mesh position={[-0.45, 0.1, 0.55]}>
@@ -1454,7 +2043,7 @@ function BlenderRig({
               event.stopPropagation();
               onSizeStep(-1);
             }}
-            disabled={sizeIndex === 0}
+            disabled={controlsLocked || sizeIndex === 0}
             aria-label="Decrease blender size"
           >
             ←
@@ -1470,7 +2059,9 @@ function BlenderRig({
               event.stopPropagation();
               onSizeStep(1);
             }}
-            disabled={sizeIndex === BLENDER_SIZES.length - 1}
+            disabled={
+              controlsLocked || sizeIndex === BLENDER_SIZES.length - 1
+            }
             aria-label="Increase blender size"
           >
             →
@@ -1478,53 +2069,136 @@ function BlenderRig({
         </div>
       </Html>
 
-      <group position={[0, 1.02, 0]}>
-        <mesh renderOrder={3} castShadow>
-          <latheGeometry args={[jarProfile, 64]} />
-          <meshPhysicalMaterial
-            color="#c8e7e2"
-            transparent
-            opacity={0.27}
-            roughness={0.08}
-            metalness={0}
-            transmission={0.45}
-            thickness={0.18}
-            ior={1.45}
-            side={THREE.DoubleSide}
-            depthWrite={false}
-          />
-        </mesh>
-        <mesh position={[0, 2.02, 0]} rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[0.8, 0.055, 16, 64]} />
-          <meshStandardMaterial
-            color="#a7c7c2"
-            transparent
-            opacity={0.52}
-            roughness={0.18}
-          />
-        </mesh>
-        <mesh position={[0.88, 1.26, 0]} rotation={[0, 0, Math.PI / 2]}>
-          <torusGeometry args={[0.5, 0.1, 16, 32, Math.PI * 1.55]} />
-          <meshPhysicalMaterial
-            color="#b8d8d5"
-            transparent
-            opacity={0.42}
-            roughness={0.12}
-            transmission={0.25}
-          />
-        </mesh>
-        {[0.55, 0.92, 1.29, 1.66].map((y, index) => (
-          <group key={y}>
-            <mesh position={[0.73 + index * 0.02, y, 0]}>
-              <boxGeometry args={[0.1, 0.016, 0.012]} />
-              <meshStandardMaterial color="#7a9c97" transparent opacity={0.62} />
-            </mesh>
-            <mesh position={[0.65 + index * 0.02, y, 0]}>
-              <boxGeometry args={[0.06, 0.012, 0.012]} />
-              <meshStandardMaterial color="#7a9c97" transparent opacity={0.48} />
+      {canServe && serveMode === "docked" && (
+        <Html
+          center
+          position={[0.25, 3.75, 0]}
+          zIndexRange={[55, 0]}
+          wrapperClass="jug-hint-anchor"
+        >
+          <div className="jug-hint">DRAG JUG TO SERVE</div>
+        </Html>
+      )}
+
+      <group ref={jugCarrier}>
+        <group ref={tiltPivot} position={[pivot.x, pivot.y, pivot.z]}>
+          <group position={[-pivot.x, -pivot.y, -pivot.z]}>
+            <group position={[0, 1.02, 0]}>
+              <mesh renderOrder={3} castShadow>
+                <latheGeometry args={[jarProfile, 64]} />
+                <meshPhysicalMaterial
+                  color="#c8e7e2"
+                  transparent
+                  opacity={0.27}
+                  roughness={0.08}
+                  metalness={0}
+                  transmission={0.45}
+                  thickness={0.18}
+                  ior={1.45}
+                  side={THREE.DoubleSide}
+                  depthWrite={false}
+                />
+              </mesh>
+              <mesh
+                position={[0, 2.02, 0]}
+                rotation={[Math.PI / 2, 0, 0]}
+              >
+                <torusGeometry args={[0.8, 0.055, 16, 64]} />
+                <meshStandardMaterial
+                  color="#a7c7c2"
+                  transparent
+                  opacity={0.52}
+                  roughness={0.18}
+                />
+              </mesh>
+              <RoundedBox
+                args={[0.28, 0.075, 0.46]}
+                radius={0.035}
+                smoothness={3}
+                position={[0.82, 2.045, 0]}
+              >
+                <meshPhysicalMaterial
+                  color="#b9dad6"
+                  transparent
+                  opacity={0.48}
+                  transmission={0.25}
+                  roughness={0.12}
+                />
+              </RoundedBox>
+              <mesh
+                position={[0.88, 1.26, 0]}
+                rotation={[0, 0, Math.PI / 2]}
+              >
+                <torusGeometry args={[0.5, 0.1, 16, 32, Math.PI * 1.55]} />
+                <meshPhysicalMaterial
+                  color="#b8d8d5"
+                  transparent
+                  opacity={0.42}
+                  roughness={0.12}
+                  transmission={0.25}
+                />
+              </mesh>
+              {[0.55, 0.92, 1.29, 1.66].map((y, index) => (
+                <group key={y}>
+                  <mesh position={[0.73 + index * 0.02, y, 0]}>
+                    <boxGeometry args={[0.1, 0.016, 0.012]} />
+                    <meshStandardMaterial
+                      color="#7a9c97"
+                      transparent
+                      opacity={0.62}
+                    />
+                  </mesh>
+                  <mesh position={[0.65 + index * 0.02, y, 0]}>
+                    <boxGeometry args={[0.06, 0.012, 0.012]} />
+                    <meshStandardMaterial
+                      color="#7a9c97"
+                      transparent
+                      opacity={0.48}
+                    />
+                  </mesh>
+                </group>
+              ))}
+            </group>
+
+            {fruitCount > 0 && (
+              <JuiceFluid
+                blending={blending}
+                blendProgress={blendProgress}
+                color={color}
+                sources={juiceSources}
+                remainingUnits={jarUnits}
+                reducedMotion={reducedMotion}
+                tiltRef={jugTiltRef}
+              />
+            )}
+
+            <object3D
+              ref={spoutAnchor}
+              position={[spout.x, spout.y, spout.z]}
+            />
+            <mesh
+              position={[0.16, 2.07, 0]}
+              onPointerDown={startJugDrag}
+              onPointerMove={moveJug}
+              onPointerUp={finishJugDrag}
+              onPointerCancel={finishJugDrag}
+              onLostPointerCapture={finishJugDrag}
+              onPointerOver={(event) => {
+                event.stopPropagation();
+                setHovered(true);
+              }}
+              onPointerOut={() => setHovered(false)}
+            >
+              <boxGeometry args={[1.9, 2.45, 1.55]} />
+              <meshBasicMaterial
+                transparent
+                opacity={0}
+                depthWrite={false}
+                colorWrite={false}
+              />
             </mesh>
           </group>
-        ))}
+        </group>
       </group>
 
       <group ref={blade} position={[0, 1.13, 0]}>
@@ -1544,16 +2218,6 @@ function BlenderRig({
         </mesh>
       </group>
 
-      {fruitCount > 0 && (
-        <JuiceFluid
-          blending={blending}
-          blendProgress={blendProgress}
-          color={color}
-          sources={juiceSources}
-          reducedMotion={reducedMotion}
-        />
-      )}
-
       <group ref={lid} position={[0.72, 3.45, 0]} rotation={[0, 0, -0.72]}>
         <mesh castShadow>
           <cylinderGeometry args={[0.84, 0.8, 0.18, 48]} />
@@ -1565,6 +2229,312 @@ function BlenderRig({
         </mesh>
       </group>
     </group>
+  );
+}
+
+function CrystalCup({
+  color,
+  fillFraction,
+  units,
+  canServe,
+  serveMode,
+  reducedMotion,
+  streamFlowRef,
+  onAutoServe,
+}: {
+  color: string;
+  fillFraction: number;
+  units: number;
+  canServe: boolean;
+  serveMode: ServeMode;
+  reducedMotion: boolean;
+  streamFlowRef: MutableRefObject<number>;
+  onAutoServe: () => void;
+}) {
+  const splash = useRef<THREE.Mesh>(null);
+  const targetRing = useRef<THREE.Mesh>(null);
+  const [hovered, setHovered] = useState(false);
+  const fillHeight = 0.82 * fillFraction;
+  const surfaceRadius = THREE.MathUtils.lerp(0.27, 0.39, fillFraction);
+  const pouring =
+    serveMode === "pouring" || serveMode === "auto-pouring";
+
+  useEffect(() => {
+    if (!hovered || !canServe) return;
+    document.body.style.cursor = "pointer";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [canServe, hovered]);
+
+  useFrame((state, delta) => {
+    if (splash.current) {
+      splash.current.visible = streamFlowRef.current > 0.04;
+      splash.current.rotation.z +=
+        delta * (reducedMotion ? 0.2 : 1.8 + streamFlowRef.current * 2);
+      const splashScale =
+        reducedMotion
+          ? 0.72
+          : 0.68 +
+            Math.sin(state.clock.elapsedTime * 8) *
+              0.08 *
+              streamFlowRef.current;
+      splash.current.scale.setScalar(splashScale);
+    }
+    if (targetRing.current) {
+      const pulse =
+        canServe && !reducedMotion
+          ? 1 + Math.sin(state.clock.elapsedTime * 3.6) * 0.08
+          : 1;
+      targetRing.current.scale.setScalar(pulse);
+    }
+  });
+
+  const status =
+    units >= CUP_CAPACITY - 0.01
+      ? "CUP FULL"
+      : pouring
+        ? `${Math.round(fillFraction * 100)}% FILLED`
+        : canServe
+          ? "HOLD JUG HERE"
+          : units > 0.01
+            ? "SMOOTHIE SERVED"
+            : "CRYSTAL CUP";
+
+  return (
+    <group position={[CUP_POSITION.x, CUP_POSITION.y, CUP_POSITION.z]}>
+      <pointLight
+        position={[0.25, 0.8, -0.3]}
+        intensity={canServe ? 3.8 : 1.2}
+        distance={2.3}
+        color="#bceff1"
+      />
+      <mesh
+        castShadow
+        position={[0, 0.57, 0]}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (canServe) onAutoServe();
+        }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerOver={(event) => {
+          event.stopPropagation();
+          setHovered(true);
+        }}
+        onPointerOut={() => setHovered(false)}
+      >
+        <cylinderGeometry args={[0.44, 0.3, 1.08, 16, 1, true]} />
+        <meshPhysicalMaterial
+          color="#e9fbff"
+          transparent
+          opacity={0.42}
+          transmission={0.72}
+          thickness={0.2}
+          ior={1.52}
+          roughness={0.045}
+          clearcoat={1}
+          clearcoatRoughness={0.06}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      <mesh position={[0, 1.11, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.44, 0.045, 14, 48]} />
+        <meshPhysicalMaterial
+          color="#eefcff"
+          transparent
+          opacity={0.72}
+          transmission={0.65}
+          roughness={0.035}
+          clearcoat={1}
+        />
+      </mesh>
+      <mesh position={[0, 0.08, 0]} receiveShadow>
+        <cylinderGeometry args={[0.3, 0.28, 0.14, 16]} />
+        <meshPhysicalMaterial
+          color="#dff3f4"
+          transparent
+          opacity={0.58}
+          transmission={0.48}
+          roughness={0.08}
+        />
+      </mesh>
+
+      {fillFraction > 0.001 && (
+        <>
+          <mesh
+            position={[0, 0.15 + fillHeight * 0.5, 0]}
+            scale={[1, Math.max(0.001, fillHeight), 1]}
+          >
+            <cylinderGeometry args={[0.37, 0.27, 1, 32]} />
+            <meshPhysicalMaterial
+              color={color}
+              transparent
+              opacity={0.72}
+              roughness={0.2}
+              transmission={0.04}
+              thickness={0.12}
+            />
+          </mesh>
+          <mesh
+            position={[0, 0.15 + fillHeight, 0]}
+            rotation={[-Math.PI / 2, 0, 0]}
+            scale={surfaceRadius}
+          >
+            <circleGeometry args={[1, 48]} />
+            <meshPhysicalMaterial
+              color={color}
+              transparent
+              opacity={0.86}
+              roughness={0.16}
+              clearcoat={0.45}
+            />
+          </mesh>
+        </>
+      )}
+
+      <mesh
+        ref={targetRing}
+        visible={canServe || pouring}
+        position={[0, 1.14, 0]}
+        rotation={[Math.PI / 2, 0, 0]}
+      >
+        <torusGeometry args={[0.59, 0.035, 12, 48]} />
+        <meshStandardMaterial
+          color="#ef8b5d"
+          emissive="#e46c48"
+          emissiveIntensity={canServe ? 0.65 : 0.25}
+          transparent
+          opacity={0.78}
+        />
+      </mesh>
+      <mesh
+        ref={splash}
+        visible={false}
+        position={[0, 0.18 + fillHeight, 0]}
+        rotation={[Math.PI / 2, 0, 0]}
+      >
+        <torusGeometry args={[0.31, 0.025, 10, 36]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.18}
+          transparent
+          opacity={0.72}
+        />
+      </mesh>
+
+      <Html
+        center
+        position={[0, 1.48, 0]}
+        zIndexRange={[54, 0]}
+        wrapperClass="cup-badge-anchor"
+      >
+        <div className={`cup-badge ${canServe ? "is-ready" : ""}`}>
+          {status}
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+function PourStream({
+  color,
+  fillFraction,
+  spoutWorldRef,
+  flowRef,
+  reducedMotion,
+}: {
+  color: string;
+  fillFraction: number;
+  spoutWorldRef: MutableRefObject<THREE.Vector3>;
+  flowRef: MutableRefObject<number>;
+  reducedMotion: boolean;
+}) {
+  const stream = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const vectorsRef = useRef({
+    start: new THREE.Vector3(),
+    end: new THREE.Vector3(),
+    control: new THREE.Vector3(),
+    a: new THREE.Vector3(),
+    b: new THREE.Vector3(),
+    direction: new THREE.Vector3(),
+  });
+  const segmentCount = reducedMotion ? 5 : 9;
+
+  useFrame((state) => {
+    const mesh = stream.current;
+    if (!mesh) return;
+    const strength = flowRef.current;
+    mesh.visible = strength > 0.025;
+    if (!mesh.visible) {
+      mesh.count = 0;
+      return;
+    }
+
+    const vectors = vectorsRef.current;
+    vectors.start.copy(spoutWorldRef.current);
+    vectors.end.set(
+      CUP_POSITION.x,
+      CUP_POSITION.y + 0.15 + 0.82 * fillFraction,
+      CUP_POSITION.z,
+    );
+    vectors.control.lerpVectors(vectors.start, vectors.end, 0.48);
+    vectors.control.y -= reducedMotion ? 0.04 : 0.18;
+
+    const pointAt = (target: THREE.Vector3, t: number) => {
+      const inverse = 1 - t;
+      target
+        .copy(vectors.start)
+        .multiplyScalar(inverse * inverse)
+        .addScaledVector(vectors.control, 2 * inverse * t)
+        .addScaledVector(vectors.end, t * t);
+    };
+
+    const radius =
+      (0.035 + strength * 0.026) *
+      (reducedMotion ? 1 : 0.92 + Math.sin(state.clock.elapsedTime * 14) * 0.04);
+    for (let index = 0; index < segmentCount; index += 1) {
+      const t0 = index / segmentCount;
+      const t1 = (index + 1) / segmentCount;
+      pointAt(vectors.a, t0);
+      pointAt(vectors.b, t1);
+      vectors.direction.copy(vectors.b).sub(vectors.a);
+      const segmentLength = vectors.direction.length();
+      dummy.position
+        .copy(vectors.a)
+        .add(vectors.b)
+        .multiplyScalar(0.5);
+      dummy.quaternion.setFromUnitVectors(up, vectors.direction.normalize());
+      dummy.scale.set(radius, segmentLength, radius);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+    }
+    mesh.count = segmentCount;
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
+  return (
+    <instancedMesh
+      ref={stream}
+      args={[undefined, undefined, 9]}
+      count={0}
+      frustumCulled={false}
+      renderOrder={5}
+    >
+      <cylinderGeometry args={[1, 0.82, 1, 12]} />
+      <meshPhysicalMaterial
+        color={color}
+        transparent
+        opacity={0.86}
+        roughness={0.18}
+        transmission={0.04}
+        clearcoat={0.35}
+        depthWrite={false}
+      />
+    </instancedMesh>
   );
 }
 
@@ -1609,13 +2579,17 @@ function JuiceFluid({
   blendProgress,
   color,
   sources,
+  remainingUnits,
   reducedMotion,
+  tiltRef,
 }: {
   blending: boolean;
   blendProgress: number;
   color: string;
   sources: JuiceSource[];
+  remainingUnits: number;
   reducedMotion: boolean;
+  tiltRef: MutableRefObject<number>;
 }) {
   const compact = useThree((state) => state.size.width < 880);
   const particleYield = reducedMotion ? 8 : compact ? 12 : 20;
@@ -1624,6 +2598,7 @@ function JuiceFluid({
     particleYield * MAX_FRUIT,
   );
   const particles = useRef<THREE.InstancedMesh>(null);
+  const liquidFrame = useRef<THREE.Group>(null);
   const bulkLiquid = useRef<THREE.Mesh>(null);
   const surface = useRef<THREE.Mesh>(null);
   const surfaceShader = useRef<THREE.ShaderMaterial>(null);
@@ -1672,9 +2647,19 @@ function JuiceFluid({
     const bodyMesh = bulkLiquid.current;
     const surfaceMesh = surface.current;
     const surfaceMaterial = surfaceShader.current;
-    if (!particleMesh || !bodyMesh || !surfaceMesh || !surfaceMaterial) return;
+    const frame = liquidFrame.current;
+    if (
+      !particleMesh ||
+      !bodyMesh ||
+      !surfaceMesh ||
+      !surfaceMaterial ||
+      !frame
+    ) {
+      return;
+    }
 
     const frameDt = Math.min(frameDelta, 0.033);
+    frame.rotation.z = -tiltRef.current * 0.9;
     motor.current = THREE.MathUtils.damp(
       motor.current,
       blending ? 1 : 0,
@@ -1721,27 +2706,34 @@ function JuiceFluid({
       sim.emittedByFruit.set(source.id, emitted);
     }
 
-    const fillUnits = sim.count / Math.max(1, particleYield);
+    const fillUnits = Math.min(
+      remainingUnits,
+      sim.count / Math.max(1, particleYield),
+    );
+    const visibleParticleCount = Math.min(
+      sim.count,
+      Math.max(0, Math.ceil(fillUnits * particleYield)),
+    );
     const fillHeight =
-      sim.count > 0 ? Math.min(1.65, 0.05 + fillUnits * 0.13) : 0;
+      fillUnits > 0.001 ? Math.min(1.65, 0.05 + fillUnits * 0.13) : 0;
     const fillTop = JAR_FLUID_BOTTOM + fillHeight;
     const surfaceRadius = Math.max(
       0.42,
       jarInteriorRadius(Math.max(JAR_FLUID_BOTTOM, fillTop)) -
         JUICE_PARTICLE_RADIUS * 0.25,
     );
-    const fluidVisible = sim.count > 0;
+    const fluidVisible = fillUnits > 0.001;
 
     bodyMesh.visible = fluidVisible;
     surfaceMesh.visible = fluidVisible;
     if (fluidVisible) {
-      bodyMesh.position.y = JAR_FLUID_BOTTOM + fillHeight * 0.5;
+      bodyMesh.position.y = JAR_FLUID_BOTTOM + fillHeight * 0.5 - 2;
       bodyMesh.scale.set(
         surfaceRadius / 0.69,
         Math.max(0.001, fillHeight),
         surfaceRadius / 0.69,
       );
-      surfaceMesh.position.y = fillTop + 0.008;
+      surfaceMesh.position.y = fillTop + 0.008 - 2;
       surfaceMesh.scale.setScalar(surfaceRadius);
       const bodyMaterial = bodyMesh.material as THREE.MeshPhysicalMaterial;
       bodyMaterial.color.lerp(mixColor, 1 - Math.exp(-frameDt * 6));
@@ -1951,8 +2943,19 @@ function JuiceFluid({
         steps += 1;
       }
 
-      particleMesh.count = sim.count;
-      for (let index = 0; index < sim.count; index += 1) {
+      particleMesh.count = visibleParticleCount;
+      for (
+        let renderIndex = 0;
+        renderIndex < visibleParticleCount;
+        renderIndex += 1
+      ) {
+        const index = Math.min(
+          sim.count - 1,
+          Math.floor(
+            (renderIndex * sim.count) /
+              Math.max(1, visibleParticleCount),
+          ),
+        );
         const offset = index * 3;
         const mixing = Math.min(
           0.76,
@@ -1967,7 +2970,7 @@ function JuiceFluid({
           .lerp(mixColor, mixing);
         dummy.position.set(
           sim.positions[offset],
-          sim.positions[offset + 1],
+          sim.positions[offset + 1] - 2,
           sim.positions[offset + 2],
         );
         const pulse =
@@ -1977,8 +2980,8 @@ function JuiceFluid({
         dummy.scale.setScalar(pulse);
         dummy.rotation.set(0, 0, 0);
         dummy.updateMatrix();
-        particleMesh.setMatrixAt(index, dummy.matrix);
-        particleMesh.setColorAt(index, particleColor);
+        particleMesh.setMatrixAt(renderIndex, dummy.matrix);
+        particleMesh.setColorAt(renderIndex, particleColor);
       }
       particleMesh.instanceMatrix.needsUpdate = true;
       if (particleMesh.instanceColor) {
@@ -1988,7 +2991,7 @@ function JuiceFluid({
   });
 
   return (
-    <group>
+    <group ref={liquidFrame} position={[0, 2, 0]}>
       <mesh ref={bulkLiquid} visible={false} renderOrder={1}>
         <cylinderGeometry args={[0.69, 0.5, 1, 48, 1, false]} />
         <meshPhysicalMaterial
