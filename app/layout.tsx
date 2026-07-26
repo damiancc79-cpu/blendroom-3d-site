@@ -18,18 +18,18 @@ export const metadata: Metadata = {
   ),
   title: "Blendroom — 3D Fruit Blender",
   description:
-    "Open the fridge, grab fresh fruit, blend a contained juice vortex, then drag the glass jug to pour into a crystal cup.",
+    "Blend fresh fruit, pour into a crystal cup, then tip it onto the counter and watch a particle-based fluid spill spread and drip.",
   openGraph: {
     title: "Blendroom — 3D Fruit Blender",
     description:
-      "Blend fresh fruit, drag the glass jug, and pour into a crystal cup.",
+      "Blend, pour, then spill a fully simulated smoothie across the counter.",
     type: "website",
     images: [
       {
         url: "/og.png",
         width: 1200,
         height: 630,
-        alt: "A glass blender jug pouring a fresh smoothie into a faceted crystal cup in a warm kitchen",
+        alt: "A tipped crystal cup spilling a smoothie into a glossy puddle across a warm kitchen counter",
       },
     ],
   },
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Blendroom — 3D Fruit Blender",
     description:
-      "Blend fresh fruit, drag the glass jug, and pour into a crystal cup.",
+      "Blend, pour, then spill a fully simulated smoothie across the counter.",
     images: ["/og.png"],
   },
 };

@@ -35,6 +35,7 @@ type FruitItem = {
   phase: number;
   juice: number;
   poured: number;
+  spilled: number;
 };
 
 type ServeMode =
@@ -44,6 +45,13 @@ type ServeMode =
   | "auto-pouring"
   | "returning"
   | "served";
+
+type SpillMode =
+  | "idle"
+  | "tipping"
+  | "spilling"
+  | "settling"
+  | "spilled";
 
 type FruitDefinition = {
   type: FruitType;
@@ -60,6 +68,13 @@ type JuiceSource = {
   juice: number;
 };
 
+type SpillSource = {
+  id: number;
+  color: string;
+  phase: number;
+  amount: number;
+};
+
 const FRUIT: FruitDefinition[] = [
   { type: "strawberry", label: "Strawberry", icon: "🍓", color: "#d94f50" },
   { type: "banana", label: "Banana", icon: "🍌", color: "#f2c84b" },
@@ -73,10 +88,14 @@ const FRUIT_COLORS = Object.fromEntries(
 ) as Record<FruitType, string>;
 
 const BLENDER_X = 0.45;
-const CUP_POSITION = new THREE.Vector3(2.35, 0.08, 0.22);
-const CUP_RIM_Y = 1.15;
+const CUP_POSITION = new THREE.Vector3(2.35, 0.02, 0.22);
+const CUP_RIM_Y = 1.13;
 const CUP_CAPACITY = 5;
 const POUR_RATE = 1.65;
+const SPILL_RATE = 3.4;
+const COUNTER_TOP_Y = 0.035;
+const MAX_SPILL_PARTICLES = 220;
+const SPILL_PARTICLE_RADIUS = 0.058;
 const FRIDGE_X = -4.15;
 const FRIDGE_Z = -2.2;
 const MAX_FRUIT = 12;
@@ -136,6 +155,7 @@ function freshFridgeFruit(
     phase: id * 1.71,
     juice: 0,
     poured: 0,
+    spilled: 0,
   };
 }
 
@@ -198,6 +218,8 @@ export default function BlenderStudio() {
   const [blending, setBlending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [serveMode, setServeMode] = useState<ServeMode>("docked");
+  const [spillMode, setSpillMode] = useState<SpillMode>("idle");
+  const [batchId, setBatchId] = useState(1);
   const [muted, setMuted] = useState(false);
   const [liveMessage, setLiveMessage] = useState(
     "Open the fridge to choose fresh fruit.",
@@ -219,11 +241,25 @@ export default function BlenderStudio() {
     0,
   );
   const cupUnits = insideFruits.reduce(
-    (sum, fruit) => sum + fruit.poured,
+    (sum, fruit) => sum + Math.max(0, fruit.poured - fruit.spilled),
     0,
   );
-  const jarUnits = Math.max(0, producedUnits - cupUnits);
+  const spilledUnits = insideFruits.reduce(
+    (sum, fruit) => sum + fruit.spilled,
+    0,
+  );
+  const jarUnits = Math.max(
+    0,
+    producedUnits -
+      insideFruits.reduce((sum, fruit) => sum + fruit.poured, 0),
+  );
   const cupFraction = THREE.MathUtils.clamp(cupUnits / CUP_CAPACITY, 0, 1);
+  const servedUnits = cupUnits + spilledUnits;
+  const spillFraction = THREE.MathUtils.clamp(
+    spilledUnits / Math.max(0.001, servedUnits),
+    0,
+    1,
+  );
   const jarColor = useMemo(
     () =>
       smoothieColor(fruits, (fruit) =>
@@ -232,20 +268,41 @@ export default function BlenderStudio() {
     [fruits],
   );
   const cupColor = useMemo(
-    () => smoothieColor(fruits, (fruit) => fruit.poured),
+    () =>
+      smoothieColor(fruits, (fruit) =>
+        Math.max(0, fruit.poured - fruit.spilled),
+      ),
     [fruits],
   );
+  const spillColor = useMemo(
+    () => smoothieColor(fruits, (fruit) => fruit.spilled),
+    [fruits],
+  );
+  const spilling =
+    spillMode === "tipping" || spillMode === "spilling";
+  const spillingActive =
+    spilling || spillMode === "settling";
   const canServe =
     blendComplete &&
     !blending &&
+    spillMode === "idle" &&
+    spilledUnits <= 0.001 &&
     jarUnits > 0.01 &&
     cupUnits < CUP_CAPACITY - 0.01;
   const pouring =
     serveMode === "pouring" || serveMode === "auto-pouring";
   const servingActive =
     serveMode === "dragging" || pouring || serveMode === "returning";
-  const sceneLocked = dragging || servingActive;
-  const batchLocked = servingActive || cupUnits > 0.001;
+  const canSpill =
+    cupUnits > 0.01 &&
+    !servingActive &&
+    spillMode === "idle";
+  const sceneLocked = dragging || servingActive || spillingActive;
+  const batchLocked =
+    servingActive ||
+    spillingActive ||
+    cupUnits > 0.001 ||
+    spilledUnits > 0.001;
   const sizeIndex = BLENDER_SIZES.reduce(
     (closest, option, index) =>
       Math.abs(option.value - blenderSize) <
@@ -294,11 +351,23 @@ export default function BlenderStudio() {
           ? "returning"
           : current,
       );
+      if (spillMode === "tipping") {
+        setSpillMode("idle");
+      } else if (spillMode === "spilling") {
+        setFruits((current) =>
+          current.map((fruit) =>
+            fruit.inJar
+              ? { ...fruit, spilled: fruit.poured }
+              : fruit,
+          ),
+        );
+        setSpillMode("settling");
+      }
     };
     document.addEventListener("visibilitychange", stopWhenHidden);
     return () =>
       document.removeEventListener("visibilitychange", stopWhenHidden);
-  }, []);
+  }, [spillMode]);
 
   useEffect(() => {
     if (!blending || muted) return;
@@ -347,7 +416,8 @@ export default function BlenderStudio() {
     setFruits((current) => {
       const active = current.filter((fruit) => fruit.inJar);
       const currentCup = active.reduce(
-        (sum, fruit) => sum + fruit.poured,
+        (sum, fruit) =>
+          sum + Math.max(0, fruit.poured - fruit.spilled),
         0,
       );
       const remaining = active.reduce(
@@ -411,6 +481,75 @@ export default function BlenderStudio() {
     return () => window.clearTimeout(timer);
   }, [canServe, cupUnits, pouring]);
 
+  const transferCupToCounter = useCallback((requested: number) => {
+    setFruits((current) => {
+      const active = current.filter((fruit) => fruit.inJar);
+      const currentCup = active.reduce(
+        (sum, fruit) =>
+          sum + Math.max(0, fruit.poured - fruit.spilled),
+        0,
+      );
+      const accepted = Math.min(requested, currentCup);
+      if (accepted <= 0.0001 || currentCup <= 0.0001) return current;
+
+      return current.map((fruit) => {
+        if (!fruit.inJar) return fruit;
+        const fruitInCup = Math.max(0, fruit.poured - fruit.spilled);
+        if (fruitInCup <= 0) return fruit;
+        return {
+          ...fruit,
+          spilled: Math.min(
+            fruit.poured,
+            fruit.spilled + accepted * (fruitInCup / currentCup),
+          ),
+        };
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (spillMode !== "tipping") return;
+    const timer = window.setTimeout(
+      () => setSpillMode("spilling"),
+      reducedMotion ? 0 : 320,
+    );
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion, spillMode]);
+
+  useEffect(() => {
+    if (spillMode !== "spilling") return;
+    const timer = window.setInterval(
+      () => transferCupToCounter(SPILL_RATE * 0.05),
+      50,
+    );
+    return () => window.clearInterval(timer);
+  }, [spillMode, transferCupToCounter]);
+
+  useEffect(() => {
+    if (spillMode !== "spilling" || cupUnits > 0.01) return;
+    const timer = window.setTimeout(() => {
+      setFruits((current) =>
+        current.map((fruit) =>
+          fruit.inJar ? { ...fruit, spilled: fruit.poured } : fruit,
+        ),
+      );
+      setSpillMode("settling");
+      setLiveMessage(
+        "Cup emptied. The smoothie is spreading across the countertop.",
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [cupUnits, spillMode]);
+
+  const finishSpillSimulation = useCallback(() => {
+    setSpillMode((current) =>
+      current === "settling" ? "spilled" : current,
+    );
+    setLiveMessage(
+      "The spill has settled into a glossy puddle. Clear the batch to reset.",
+    );
+  }, []);
+
   useEffect(() => {
     const returnJug = (message: string) => {
       if (!servingActive) return;
@@ -432,14 +571,35 @@ export default function BlenderStudio() {
     };
   }, [servingActive]);
 
+  useEffect(() => {
+    const cancelCupTip = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || spillMode !== "tipping") return;
+      setSpillMode("idle");
+      setLiveMessage("Cup tip canceled before any smoothie was spilled.");
+    };
+    const cancelCupTipOnBlur = () => {
+      if (spillMode !== "tipping") return;
+      setSpillMode("idle");
+      setLiveMessage("Cup tip canceled before any smoothie was spilled.");
+    };
+    window.addEventListener("keydown", cancelCupTip);
+    window.addEventListener("blur", cancelCupTipOnBlur);
+    return () => {
+      window.removeEventListener("keydown", cancelCupTip);
+      window.removeEventListener("blur", cancelCupTipOnBlur);
+    };
+  }, [spillMode]);
+
   const beginAutoServe = useCallback(() => {
-    if (servingActive) {
-      setLiveMessage("Finish the current serving gesture first.");
+    if (servingActive || spillingActive) {
+      setLiveMessage("Finish the current fluid interaction first.");
       return;
     }
     if (!canServe) {
       setLiveMessage(
-        blendComplete
+        spilledUnits > 0.001
+          ? "Clear the countertop spill before serving again."
+          : blendComplete
           ? "The cup or jug has no room left. Clear the batch to start again."
           : "Blend the fruit until smooth before serving.",
       );
@@ -448,13 +608,39 @@ export default function BlenderStudio() {
     setServeMode("auto-pouring");
     setDragging(false);
     setLiveMessage("Jug moving into place. Pouring into the crystal cup.");
-  }, [blendComplete, canServe, servingActive]);
+  }, [
+    blendComplete,
+    canServe,
+    servingActive,
+    spilledUnits,
+    spillingActive,
+  ]);
+
+  const beginSpill = useCallback(() => {
+    if (sceneLocked) {
+      setLiveMessage("Finish the current interaction before tipping the cup.");
+      return;
+    }
+    if (!canSpill) {
+      setLiveMessage(
+        spillMode === "spilled"
+          ? "The smoothie is already spread across the counter."
+          : "Serve smoothie into the crystal cup before spilling it.",
+      );
+      return;
+    }
+    setSpillMode("tipping");
+    setDragging(false);
+    setLiveMessage(
+      "Crystal cup tipping. Watch the smoothie hit and spread across the table.",
+    );
+  }, [canSpill, sceneLocked, spillMode]);
 
   const toggleFridge = useCallback(() => {
-    if (sceneLocked || cupUnits > 0.001) {
+    if (sceneLocked || cupUnits > 0.001 || spilledUnits > 0.001) {
       setLiveMessage(
         sceneLocked
-          ? "Finish serving before using the fridge."
+          ? "Finish the current fluid interaction before using the fridge."
           : "Clear the served smoothie before starting a new batch.",
       );
       return;
@@ -475,7 +661,7 @@ export default function BlenderStudio() {
     setLiveMessage(
       "Fridge closed. Five fresh fruits generated inside.",
     );
-  }, [cupUnits, fridgeOpen, fruits, sceneLocked]);
+  }, [cupUnits, fridgeOpen, fruits, sceneLocked, spilledUnits]);
 
   const dropFruit = useCallback(
     (
@@ -639,11 +825,11 @@ export default function BlenderStudio() {
   );
 
   const toggleBlend = () => {
-    if (sceneLocked || cupUnits > 0.001) {
+    if (sceneLocked || cupUnits > 0.001 || spilledUnits > 0.001) {
       setLiveMessage(
         sceneLocked
           ? "Finish the current interaction before using the blender."
-          : "The smoothie has been served. Clear the batch to blend again.",
+          : "The smoothie has left the jug. Clear the batch to blend again.",
       );
       return;
     }
@@ -666,6 +852,8 @@ export default function BlenderStudio() {
     setBlending(false);
     setDragging(false);
     setServeMode("docked");
+    setSpillMode("idle");
+    setBatchId((current) => current + 1);
     const fresh = FRUIT.map((fruit, index) =>
       freshFridgeFruit(nextId.current++, fruit.type, index),
     );
@@ -690,41 +878,70 @@ export default function BlenderStudio() {
     setDragging(false);
   }, [canServe, cupUnits]);
 
-  const phaseLabel =
-    pouring ? "Pouring smoothie"
-    : serveMode === "dragging" ? "Carry jug to cup"
-    : serveMode === "returning" ? "Jug returning"
-    : serveMode === "served" ?
-      cupUnits >= CUP_CAPACITY - 0.01 ? "Crystal cup full"
-      : "Smoothie served"
-    : blendProgress >= 0.98
-      ? "Silky smooth"
-    : blending && blendProgress > 0.62 ? "Fluid vortex"
-    : blending && blendProgress > 0.24 ? "Juice releasing"
-    : blending ? "Crushing fruit"
-    : blendProgress > 0.02 ? "Partly blended"
-    : insideCount ? "Ready to whirl"
-    : "Waiting for fruit";
+  const phaseLabel = (() => {
+    if (spillMode === "tipping") return "Cup tipping";
+    if (spillMode === "spilling") return "Fluid spill";
+    if (spillMode === "settling") return "Puddle spreading";
+    if (spillMode === "spilled") return "Counter covered";
+    if (pouring) return "Pouring smoothie";
+    if (serveMode === "dragging") return "Carry jug to cup";
+    if (serveMode === "returning") return "Jug returning";
+    if (serveMode === "served") {
+      return cupUnits >= CUP_CAPACITY - 0.01
+        ? "Crystal cup full"
+        : "Smoothie served";
+    }
+    if (blendProgress >= 0.98) return "Silky smooth";
+    if (blending && blendProgress > 0.62) return "Fluid vortex";
+    if (blending && blendProgress > 0.24) return "Juice releasing";
+    if (blending) return "Crushing fruit";
+    if (blendProgress > 0.02) return "Partly blended";
+    return insideCount ? "Ready to whirl" : "Waiting for fruit";
+  })();
   const statusProgress =
-    cupUnits > 0.001 || servingActive ? cupFraction : blendProgress;
-  const serveLabel = pouring
-    ? `Pouring · ${Math.round(cupFraction * 100)}%`
-    : serveMode === "dragging"
-      ? "Hold the jug over the cup"
-      : cupUnits >= CUP_CAPACITY - 0.01
-        ? "Crystal cup filled"
-        : jarUnits <= 0.01 && cupUnits > 0
-          ? "Smoothie served"
-          : canServe
-            ? "Drag the jug to the cup"
-            : "Blend until silky smooth";
-  const serveButtonLabel = pouring
-    ? "Pouring…"
-    : cupUnits >= CUP_CAPACITY - 0.01
-      ? "Cup filled"
-      : jarUnits <= 0.01 && cupUnits > 0
-        ? "Jug empty"
-        : "Pour for me";
+    spillingActive || spilledUnits > 0.001
+      ? spillFraction
+      : cupUnits > 0.001 || servingActive
+        ? cupFraction
+        : blendProgress;
+  const serveLabel = (() => {
+    if (spillMode === "tipping") return "Cup tipping toward the table";
+    if (spillMode === "spilling") {
+      return `Spilling · ${Math.round(spillFraction * 100)}%`;
+    }
+    if (spillMode === "settling") return "Fluid spreading and settling";
+    if (spillMode === "spilled") return "Smoothie puddle settled";
+    if (pouring) return `Pouring · ${Math.round(cupFraction * 100)}%`;
+    if (serveMode === "dragging") return "Hold the jug over the cup";
+    if (canSpill) return "Click the cup to spill it";
+    if (cupUnits >= CUP_CAPACITY - 0.01) return "Crystal cup filled";
+    if (jarUnits <= 0.01 && cupUnits > 0) return "Smoothie served";
+    return canServe ? "Drag the jug to the cup" : "Blend until silky smooth";
+  })();
+  const serveButtonLabel =
+    spillMode === "tipping" || spillMode === "spilling" ? "Spilling…"
+    : spillMode === "settling" ? "Settling…"
+    : spillMode === "spilled" ? "Spilled"
+    : canSpill ? "Spill it"
+    : pouring ? "Pouring…"
+    : cupUnits >= CUP_CAPACITY - 0.01 ? "Cup filled"
+    : jarUnits <= 0.01 && cupUnits > 0 ? "Jug empty"
+    : "Pour for me";
+  const cupAction = canSpill ? beginSpill : beginAutoServe;
+  const cupActionDisabled =
+    servingActive || spillingActive || (!canServe && !canSpill);
+  const cupActionLabel =
+    spillMode === "tipping"
+      ? "Crystal cup is tipping toward the counter"
+      : spillMode === "spilling"
+        ? "Smoothie is spilling from the crystal cup"
+        : spillMode === "settling"
+          ? "Smoothie spill is spreading across the counter"
+          : spillMode === "spilled"
+            ? "Smoothie spilled; clear the batch to reset"
+            : canSpill
+              ? "Spill all smoothie from the crystal cup onto the counter"
+              : "Automatically pour the smoothie into the crystal cup";
 
   return (
     <main className="studio-shell">
@@ -754,11 +971,17 @@ export default function BlenderStudio() {
               blendComplete={blendComplete}
               smoothieColor={jarColor}
               cupColor={cupColor}
+              spillColor={spillColor}
               jarUnits={jarUnits}
               cupUnits={cupUnits}
+              spilledUnits={spilledUnits}
               cupFraction={cupFraction}
+              spillFraction={spillFraction}
               canServe={canServe}
+              canSpill={canSpill}
               serveMode={serveMode}
+              spillMode={spillMode}
+              batchId={batchId}
               batchLocked={batchLocked}
               fridgeOpen={fridgeOpen}
               fridgeCount={fridgeCount}
@@ -773,6 +996,8 @@ export default function BlenderStudio() {
               onServeModeChange={handleServeModeChange}
               onReturnComplete={finishJugReturn}
               onAutoServe={beginAutoServe}
+              onSpill={beginSpill}
+              onSpillSettled={finishSpillSimulation}
             />
           </Suspense>
         </Canvas>
@@ -786,16 +1011,24 @@ export default function BlenderStudio() {
           BLENDROOM · KITCHEN LAB
         </div>
         <h1 id="studio-title">Blend what&apos;s fresh.</h1>
-        <p>Blend until smooth, then drag the glass jug to the crystal cup.</p>
+        <p>Blend, pour, then click the crystal cup and watch fluid physics take over.</p>
       </header>
 
       <aside
-        className={`utility-pill ${blending || pouring ? "is-live" : ""}`}
+        className={`utility-pill ${
+          blending || pouring || spillingActive ? "is-live" : ""
+        }`}
       >
         <span className="status-dot" aria-hidden="true" />
         <div className="status-copy">
           <span>
-            {blending ? "Motor running" : pouring ? "Serving now" : "Kitchen status"}
+            {blending
+              ? "Motor running"
+              : pouring
+                ? "Serving now"
+                : spillingActive
+                  ? "Fluid simulation"
+                  : "Kitchen status"}
           </span>
           <strong>
             {phaseLabel}
@@ -815,7 +1048,12 @@ export default function BlenderStudio() {
           className="utility-button clear-button"
           type="button"
           onClick={reset}
-          disabled={!insideCount && !onBoardCount && cupUnits <= 0.001}
+          disabled={
+            !insideCount &&
+            !onBoardCount &&
+            cupUnits <= 0.001 &&
+            spilledUnits <= 0.001
+          }
           aria-label="Clear the current batch and restock the fridge"
           title="Fresh batch"
         >
@@ -824,28 +1062,56 @@ export default function BlenderStudio() {
       </aside>
 
       <aside
-        className={`serve-panel ${canServe ? "is-ready" : ""} ${
+        className={`serve-panel ${canServe || canSpill ? "is-ready" : ""} ${
           pouring ? "is-pouring" : ""
+        } ${canSpill ? "is-spill-ready" : ""} ${
+          spillingActive ? "is-spilling" : ""
         }`}
         aria-labelledby="serve-title"
       >
-        <div className="serve-cup-glyph" aria-hidden="true">
+        <div
+          className={`serve-cup-glyph ${
+            spillingActive || spillMode === "spilled" ? "is-tipped" : ""
+          }`}
+          aria-hidden="true"
+        >
           <span style={{ height: `${Math.max(5, cupFraction * 82)}%` }} />
         </div>
         <div className="serve-copy">
-          <small id="serve-title">Crystal serve</small>
+          <small id="serve-title">
+            {spilledUnits > 0.001 || spillingActive
+              ? "Counter fluid"
+              : "Crystal serve"}
+          </small>
           <strong>{serveLabel}</strong>
           <progress
-            value={cupUnits}
-            max={CUP_CAPACITY}
-            aria-label="Crystal cup fill level"
+            value={
+              spilledUnits > 0.001 || spillingActive
+                ? spilledUnits
+                : cupUnits
+            }
+            max={
+              spilledUnits > 0.001 || spillingActive
+                ? Math.max(0.001, servedUnits)
+                : CUP_CAPACITY
+            }
+            aria-label={
+              spilledUnits > 0.001 || spillingActive
+                ? "Spill simulation progress"
+                : "Crystal cup fill level"
+            }
+            aria-valuetext={
+              spilledUnits > 0.001 || spillingActive
+                ? `${Math.round(spillFraction * 100)}% spilled`
+                : `${Math.round(cupFraction * 100)}% full`
+            }
           />
         </div>
         <button
           type="button"
-          onClick={beginAutoServe}
-          disabled={!canServe || servingActive}
-          aria-label="Automatically pour the smoothie into the crystal cup"
+          onClick={cupAction}
+          disabled={cupActionDisabled}
+          aria-label={cupActionLabel}
         >
           {serveButtonLabel}
         </button>
@@ -868,11 +1134,17 @@ type SceneProps = {
   blendComplete: boolean;
   smoothieColor: string;
   cupColor: string;
+  spillColor: string;
   jarUnits: number;
   cupUnits: number;
+  spilledUnits: number;
   cupFraction: number;
+  spillFraction: number;
   canServe: boolean;
+  canSpill: boolean;
   serveMode: ServeMode;
+  spillMode: SpillMode;
+  batchId: number;
   batchLocked: boolean;
   fridgeOpen: boolean;
   fridgeCount: number;
@@ -891,6 +1163,8 @@ type SceneProps = {
   onServeModeChange: (mode: ServeMode) => void;
   onReturnComplete: () => void;
   onAutoServe: () => void;
+  onSpill: () => void;
+  onSpillSettled: () => void;
 };
 
 function BlendroomScene({
@@ -903,11 +1177,17 @@ function BlendroomScene({
   blendComplete,
   smoothieColor: color,
   cupColor,
+  spillColor,
   jarUnits,
   cupUnits,
+  spilledUnits,
   cupFraction,
+  spillFraction,
   canServe,
+  canSpill,
   serveMode,
+  spillMode,
+  batchId,
   batchLocked,
   fridgeOpen,
   fridgeCount,
@@ -922,12 +1202,18 @@ function BlendroomScene({
   onServeModeChange,
   onReturnComplete,
   onAutoServe,
+  onSpill,
+  onSpillSettled,
 }: SceneProps) {
   const compact = useThree((state) => state.size.width < 880);
   const spoutWorldRef = useRef(
     new THREE.Vector3(BLENDER_X, 3.06 * blenderSize, 0),
   );
   const streamFlowRef = useRef(0);
+  const cupRimWorldRef = useRef(
+    new THREE.Vector3(CUP_POSITION.x + 0.42, CUP_RIM_Y, CUP_POSITION.z),
+  );
+  const spillFlowRef = useRef(0);
   const activeFruitCount = fruits.filter((fruit) => !fruit.inFridge).length;
   const canTakeFromFridge =
     !dragging && !batchLocked && activeFruitCount < MAX_FRUIT;
@@ -946,6 +1232,18 @@ function BlendroomScene({
           color: FRUIT_COLORS[fruit.type],
           phase: fruit.phase,
           juice: fruit.juice,
+        })),
+    [fruits],
+  );
+  const spillSources = useMemo<SpillSource[]>(
+    () =>
+      fruits
+        .filter((fruit) => fruit.inJar && fruit.spilled > 0.0001)
+        .map((fruit) => ({
+          id: fruit.id,
+          color: FRUIT_COLORS[fruit.type],
+          phase: fruit.phase,
+          amount: fruit.spilled,
         })),
     [fruits],
   );
@@ -1013,12 +1311,18 @@ function BlendroomScene({
       <CrystalCup
         color={cupColor}
         fillFraction={cupFraction}
+        spillFraction={spillFraction}
         units={cupUnits}
         canServe={canServe}
+        canSpill={canSpill}
         serveMode={serveMode}
+        spillMode={spillMode}
         reducedMotion={reducedMotion}
         streamFlowRef={streamFlowRef}
+        spillFlowRef={spillFlowRef}
+        cupRimWorldRef={cupRimWorldRef}
         onAutoServe={onAutoServe}
+        onSpill={onSpill}
       />
       <PourStream
         color={cupUnits > 0.001 ? cupColor : color}
@@ -1026,6 +1330,24 @@ function BlendroomScene({
         spoutWorldRef={spoutWorldRef}
         flowRef={streamFlowRef}
         reducedMotion={reducedMotion}
+      />
+      <CupSpillStream
+        color={spilledUnits > 0.001 ? spillColor : cupColor}
+        cupRimWorldRef={cupRimWorldRef}
+        flowRef={spillFlowRef}
+        reducedMotion={reducedMotion}
+      />
+      <SpillFluidSimulation
+        key={batchId}
+        sources={spillSources}
+        color={spillColor}
+        spillFraction={spillFraction}
+        spillMode={spillMode}
+        blenderSize={blenderSize}
+        cupRimWorldRef={cupRimWorldRef}
+        flowRef={spillFlowRef}
+        reducedMotion={reducedMotion}
+        onSettled={onSpillSettled}
       />
 
       {fruits.map((fruit) => (
@@ -2235,22 +2557,37 @@ function BlenderRig({
 function CrystalCup({
   color,
   fillFraction,
+  spillFraction,
   units,
   canServe,
+  canSpill,
   serveMode,
+  spillMode,
   reducedMotion,
   streamFlowRef,
+  spillFlowRef,
+  cupRimWorldRef,
   onAutoServe,
+  onSpill,
 }: {
   color: string;
   fillFraction: number;
+  spillFraction: number;
   units: number;
   canServe: boolean;
+  canSpill: boolean;
   serveMode: ServeMode;
+  spillMode: SpillMode;
   reducedMotion: boolean;
   streamFlowRef: MutableRefObject<number>;
+  spillFlowRef: MutableRefObject<number>;
+  cupRimWorldRef: MutableRefObject<THREE.Vector3>;
   onAutoServe: () => void;
+  onSpill: () => void;
 }) {
+  const cupPivot = useRef<THREE.Group>(null);
+  const liquidFrame = useRef<THREE.Group>(null);
+  const rimAnchor = useRef<THREE.Object3D>(null);
   const splash = useRef<THREE.Mesh>(null);
   const targetRing = useRef<THREE.Mesh>(null);
   const [hovered, setHovered] = useState(false);
@@ -2258,16 +2595,47 @@ function CrystalCup({
   const surfaceRadius = THREE.MathUtils.lerp(0.27, 0.39, fillFraction);
   const pouring =
     serveMode === "pouring" || serveMode === "auto-pouring";
+  const tipping = spillMode !== "idle";
+  const spillInteraction = spillMode !== "idle";
 
   useEffect(() => {
-    if (!hovered || !canServe) return;
+    if (!hovered || (!canServe && !canSpill)) return;
     document.body.style.cursor = "pointer";
     return () => {
       document.body.style.cursor = "";
     };
-  }, [canServe, hovered]);
+  }, [canServe, canSpill, hovered]);
 
   useFrame((state, delta) => {
+    const dt = Math.min(delta, 0.05);
+    const targetTilt = tipping ? 1.23 : 0;
+    if (cupPivot.current) {
+      cupPivot.current.rotation.x = reducedMotion
+        ? targetTilt
+        : THREE.MathUtils.damp(
+            cupPivot.current.rotation.x,
+            targetTilt,
+            6.8,
+            dt,
+          );
+    }
+    if (liquidFrame.current && cupPivot.current) {
+      liquidFrame.current.rotation.x =
+        -cupPivot.current.rotation.x * 0.9;
+      liquidFrame.current.position.z =
+        Math.abs(cupPivot.current.rotation.x) * 0.11;
+    }
+    rimAnchor.current?.updateWorldMatrix(true, false);
+    rimAnchor.current?.getWorldPosition(cupRimWorldRef.current);
+    const targetSpillFlow =
+      spillMode === "spilling" && units > 0.002 ? 1 : 0;
+    spillFlowRef.current = THREE.MathUtils.damp(
+      spillFlowRef.current,
+      targetSpillFlow,
+      reducedMotion ? 40 : 9,
+      dt,
+    );
+
     if (splash.current) {
       splash.current.visible = streamFlowRef.current > 0.04;
       splash.current.rotation.z +=
@@ -2283,7 +2651,7 @@ function CrystalCup({
     }
     if (targetRing.current) {
       const pulse =
-        canServe && !reducedMotion
+        (canServe || canSpill) && !reducedMotion
           ? 1 + Math.sin(state.clock.elapsedTime * 3.6) * 0.08
           : 1;
       targetRing.current.scale.setScalar(pulse);
@@ -2291,7 +2659,17 @@ function CrystalCup({
   });
 
   const status =
-    units >= CUP_CAPACITY - 0.01
+    spillMode === "spilled"
+      ? "TABLE SPILLED"
+      : spillMode === "settling"
+        ? "JUICE SPREADING"
+        : spillMode === "spilling"
+          ? `${Math.round(spillFraction * 100)}% SPILLED`
+          : spillMode === "tipping"
+            ? "TIPPING CUP"
+            : canSpill
+              ? "CLICK CUP TO SPILL"
+              : units >= CUP_CAPACITY - 0.01
       ? "CUP FULL"
       : pouring
         ? `${Math.round(fillFraction * 100)}% FILLED`
@@ -2305,124 +2683,133 @@ function CrystalCup({
     <group position={[CUP_POSITION.x, CUP_POSITION.y, CUP_POSITION.z]}>
       <pointLight
         position={[0.25, 0.8, -0.3]}
-        intensity={canServe ? 3.8 : 1.2}
+        intensity={canServe || canSpill ? 3.8 : 1.2}
         distance={2.3}
         color="#bceff1"
       />
-      <mesh
-        castShadow
-        position={[0, 0.57, 0]}
-        onClick={(event) => {
-          event.stopPropagation();
-          if (canServe) onAutoServe();
-        }}
-        onPointerDown={(event) => event.stopPropagation()}
-        onPointerOver={(event) => {
-          event.stopPropagation();
-          setHovered(true);
-        }}
-        onPointerOut={() => setHovered(false)}
-      >
-        <cylinderGeometry args={[0.44, 0.3, 1.08, 16, 1, true]} />
-        <meshPhysicalMaterial
-          color="#e9fbff"
-          transparent
-          opacity={0.42}
-          transmission={0.72}
-          thickness={0.2}
-          ior={1.52}
-          roughness={0.045}
-          clearcoat={1}
-          clearcoatRoughness={0.06}
-          side={THREE.DoubleSide}
-          depthWrite={false}
-        />
-      </mesh>
-      <mesh position={[0, 1.11, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.44, 0.045, 14, 48]} />
-        <meshPhysicalMaterial
-          color="#eefcff"
-          transparent
-          opacity={0.72}
-          transmission={0.65}
-          roughness={0.035}
-          clearcoat={1}
-        />
-      </mesh>
-      <mesh position={[0, 0.08, 0]} receiveShadow>
-        <cylinderGeometry args={[0.3, 0.28, 0.14, 16]} />
-        <meshPhysicalMaterial
-          color="#dff3f4"
-          transparent
-          opacity={0.58}
-          transmission={0.48}
-          roughness={0.08}
-        />
-      </mesh>
-
-      {fillFraction > 0.001 && (
-        <>
+      <group ref={cupPivot} position={[0, 0.01, 0.3]}>
+        <group position={[0, -0.01, -0.3]}>
           <mesh
-            position={[0, 0.15 + fillHeight * 0.5, 0]}
-            scale={[1, Math.max(0.001, fillHeight), 1]}
+            castShadow
+            position={[0, 0.57, 0]}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (canSpill) onSpill();
+              else if (canServe) onAutoServe();
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            onPointerOver={(event) => {
+              event.stopPropagation();
+              setHovered(true);
+            }}
+            onPointerOut={() => setHovered(false)}
           >
-            <cylinderGeometry args={[0.37, 0.27, 1, 32]} />
+            <cylinderGeometry args={[0.44, 0.3, 1.08, 16, 1, true]} />
             <meshPhysicalMaterial
-              color={color}
+              color="#e9fbff"
+              transparent
+              opacity={0.42}
+              transmission={0.72}
+              thickness={0.2}
+              ior={1.52}
+              roughness={0.045}
+              clearcoat={1}
+              clearcoatRoughness={0.06}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh
+            position={[0, 1.11, 0]}
+            rotation={[Math.PI / 2, 0, 0]}
+          >
+            <torusGeometry args={[0.44, 0.045, 14, 48]} />
+            <meshPhysicalMaterial
+              color="#eefcff"
               transparent
               opacity={0.72}
-              roughness={0.2}
-              transmission={0.04}
-              thickness={0.12}
+              transmission={0.65}
+              roughness={0.035}
+              clearcoat={1}
+            />
+          </mesh>
+          <mesh position={[0, 0.08, 0]} receiveShadow>
+            <cylinderGeometry args={[0.3, 0.28, 0.14, 16]} />
+            <meshPhysicalMaterial
+              color="#dff3f4"
+              transparent
+              opacity={0.58}
+              transmission={0.48}
+              roughness={0.08}
+            />
+          </mesh>
+
+          {fillFraction > 0.001 && (
+            <group ref={liquidFrame} position={[0, 0.62, 0]}>
+              <mesh
+                position={[0, 0.15 + fillHeight * 0.5 - 0.62, 0]}
+                scale={[1, Math.max(0.001, fillHeight), 1]}
+              >
+                <cylinderGeometry args={[0.37, 0.27, 1, 32]} />
+                <meshPhysicalMaterial
+                  color={color}
+                  transparent
+                  opacity={0.72}
+                  roughness={0.2}
+                  transmission={0.04}
+                  thickness={0.12}
+                />
+              </mesh>
+              <mesh
+                position={[0, 0.15 + fillHeight - 0.62, 0]}
+                rotation={[-Math.PI / 2, 0, 0]}
+                scale={surfaceRadius}
+              >
+                <circleGeometry args={[1, 48]} />
+                <meshPhysicalMaterial
+                  color={color}
+                  transparent
+                  opacity={0.86}
+                  roughness={0.16}
+                  clearcoat={0.45}
+                />
+              </mesh>
+            </group>
+          )}
+
+          <mesh
+            ref={targetRing}
+            visible={canServe || pouring || canSpill}
+            position={[0, 1.14, 0]}
+            rotation={[Math.PI / 2, 0, 0]}
+          >
+            <torusGeometry args={[0.59, 0.035, 12, 48]} />
+            <meshStandardMaterial
+              color={canSpill ? "#db5849" : "#ef8b5d"}
+              emissive={canSpill ? "#b63f36" : "#e46c48"}
+              emissiveIntensity={canServe || canSpill ? 0.65 : 0.25}
+              transparent
+              opacity={0.78}
             />
           </mesh>
           <mesh
-            position={[0, 0.15 + fillHeight, 0]}
-            rotation={[-Math.PI / 2, 0, 0]}
-            scale={surfaceRadius}
+            ref={splash}
+            visible={false}
+            position={[0, 0.18 + fillHeight, 0]}
+            rotation={[Math.PI / 2, 0, 0]}
           >
-            <circleGeometry args={[1, 48]} />
-            <meshPhysicalMaterial
+            <torusGeometry args={[0.31, 0.025, 10, 36]} />
+            <meshStandardMaterial
               color={color}
+              emissive={color}
+              emissiveIntensity={0.18}
               transparent
-              opacity={0.86}
-              roughness={0.16}
-              clearcoat={0.45}
+              opacity={0.72}
             />
           </mesh>
-        </>
-      )}
-
-      <mesh
-        ref={targetRing}
-        visible={canServe || pouring}
-        position={[0, 1.14, 0]}
-        rotation={[Math.PI / 2, 0, 0]}
-      >
-        <torusGeometry args={[0.59, 0.035, 12, 48]} />
-        <meshStandardMaterial
-          color="#ef8b5d"
-          emissive="#e46c48"
-          emissiveIntensity={canServe ? 0.65 : 0.25}
-          transparent
-          opacity={0.78}
-        />
-      </mesh>
-      <mesh
-        ref={splash}
-        visible={false}
-        position={[0, 0.18 + fillHeight, 0]}
-        rotation={[Math.PI / 2, 0, 0]}
-      >
-        <torusGeometry args={[0.31, 0.025, 10, 36]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.18}
-          transparent
-          opacity={0.72}
-        />
-      </mesh>
+          <object3D ref={rimAnchor} position={[0, 1.11, 0.42]} />
+        </group>
+      </group>
 
       <Html
         center
@@ -2430,10 +2817,692 @@ function CrystalCup({
         zIndexRange={[54, 0]}
         wrapperClass="cup-badge-anchor"
       >
-        <div className={`cup-badge ${canServe ? "is-ready" : ""}`}>
+        <div
+          className={`cup-badge ${
+            canServe || canSpill ? "is-ready" : ""
+          } ${spillInteraction ? "is-spilling" : ""}`}
+        >
           {status}
         </div>
       </Html>
+    </group>
+  );
+}
+
+function CupSpillStream({
+  color,
+  cupRimWorldRef,
+  flowRef,
+  reducedMotion,
+}: {
+  color: string;
+  cupRimWorldRef: MutableRefObject<THREE.Vector3>;
+  flowRef: MutableRefObject<number>;
+  reducedMotion: boolean;
+}) {
+  const streamRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const vectorsRef = useRef({
+    start: new THREE.Vector3(),
+    end: new THREE.Vector3(),
+    control: new THREE.Vector3(),
+    a: new THREE.Vector3(),
+    b: new THREE.Vector3(),
+    direction: new THREE.Vector3(),
+  });
+  const segmentCount = reducedMotion ? 4 : 7;
+
+  useFrame((state) => {
+    const mesh = streamRef.current;
+    if (!mesh) return;
+    const strength = flowRef.current;
+    mesh.visible = strength > 0.025;
+    if (!mesh.visible) {
+      mesh.count = 0;
+      return;
+    }
+
+    const vectors = vectorsRef.current;
+    vectors.start.copy(cupRimWorldRef.current);
+    vectors.end.set(
+      vectors.start.x,
+      COUNTER_TOP_Y + 0.045,
+      Math.min(2.18, vectors.start.z + 0.34),
+    );
+    vectors.control.lerpVectors(vectors.start, vectors.end, 0.48);
+    vectors.control.y -= reducedMotion ? 0.015 : 0.09;
+    vectors.control.z += 0.08;
+
+    const pointAt = (target: THREE.Vector3, t: number) => {
+      const inverse = 1 - t;
+      target
+        .copy(vectors.start)
+        .multiplyScalar(inverse * inverse)
+        .addScaledVector(vectors.control, 2 * inverse * t)
+        .addScaledVector(vectors.end, t * t);
+    };
+
+    const radius =
+      (0.038 + strength * 0.026) *
+      (reducedMotion
+        ? 1
+        : 0.94 + Math.sin(state.clock.elapsedTime * 15) * 0.045);
+    for (let index = 0; index < segmentCount; index += 1) {
+      pointAt(vectors.a, index / segmentCount);
+      pointAt(vectors.b, (index + 1) / segmentCount);
+      vectors.direction.copy(vectors.b).sub(vectors.a);
+      const segmentLength = vectors.direction.length();
+      dummy.position
+        .copy(vectors.a)
+        .add(vectors.b)
+        .multiplyScalar(0.5);
+      dummy.quaternion.setFromUnitVectors(up, vectors.direction.normalize());
+      dummy.scale.set(radius, segmentLength, radius);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+    }
+    mesh.count = segmentCount;
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+
+  return (
+    <instancedMesh
+      ref={streamRef}
+      args={[undefined, undefined, 7]}
+      count={0}
+      frustumCulled={false}
+      renderOrder={6}
+    >
+      <cylinderGeometry args={[1, 0.76, 1, 12]} />
+      <meshPhysicalMaterial
+        color={color}
+        transparent
+        opacity={0.88}
+        roughness={0.14}
+        clearcoat={0.62}
+        clearcoatRoughness={0.16}
+        depthWrite={false}
+      />
+    </instancedMesh>
+  );
+}
+
+type SpillFluidState = {
+  count: number;
+  accumulator: number;
+  settledFrames: number;
+  frozen: boolean;
+  positions: Float32Array;
+  previous: Float32Array;
+  velocities: Float32Array;
+  colors: Float32Array;
+  ages: Float32Array;
+  surface: Uint8Array;
+  emittedByFruit: Map<number, number>;
+};
+
+function spillHashKey(x: number, y: number, z: number) {
+  return (
+    (x * 73856093) ^
+    (y * 19349663) ^
+    (z * 83492791)
+  );
+}
+
+function SpillFluidSimulation({
+  sources,
+  color,
+  spillFraction,
+  spillMode,
+  blenderSize,
+  cupRimWorldRef,
+  flowRef,
+  reducedMotion,
+  onSettled,
+}: {
+  sources: SpillSource[];
+  color: string;
+  spillFraction: number;
+  spillMode: SpillMode;
+  blenderSize: number;
+  cupRimWorldRef: MutableRefObject<THREE.Vector3>;
+  flowRef: MutableRefObject<number>;
+  reducedMotion: boolean;
+  onSettled: () => void;
+}) {
+  const compact = useThree((state) => state.size.width < 880);
+  const particleYield = reducedMotion ? 12 : compact ? 25 : 44;
+  const particleLimit = Math.min(
+    MAX_SPILL_PARTICLES,
+    Math.round(CUP_CAPACITY * particleYield),
+  );
+  const particlesRef = useRef<THREE.InstancedMesh>(null);
+  const impactRippleRef = useRef<THREE.Mesh>(null);
+  const hashRef = useRef(new Map<number, number[]>());
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const particleColor = useMemo(() => new THREE.Color(), []);
+  const mixColor = useMemo(() => new THREE.Color(color), [color]);
+  const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const velocityDirection = useMemo(() => new THREE.Vector3(), []);
+  const simRef = useRef<SpillFluidState>({
+    count: 0,
+    accumulator: 0,
+    settledFrames: 0,
+    frozen: false,
+    positions: new Float32Array(MAX_SPILL_PARTICLES * 3),
+    previous: new Float32Array(MAX_SPILL_PARTICLES * 3),
+    velocities: new Float32Array(MAX_SPILL_PARTICLES * 3),
+    colors: new Float32Array(MAX_SPILL_PARTICLES * 3),
+    ages: new Float32Array(MAX_SPILL_PARTICLES),
+    surface: new Uint8Array(MAX_SPILL_PARTICLES),
+    emittedByFruit: new Map(),
+  });
+
+  useEffect(() => {
+    const mesh = particlesRef.current;
+    if (!mesh) return;
+    mesh.count = 0;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.setColorAt(0, new THREE.Color("#ffffff"));
+    if (mesh.instanceColor) {
+      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+      mesh.instanceColor.needsUpdate = true;
+    }
+  }, []);
+
+  useFrame((state, frameDelta) => {
+    const mesh = particlesRef.current;
+    const ripple = impactRippleRef.current;
+    if (!mesh || !ripple) return;
+    const sim = simRef.current;
+    const rim = cupRimWorldRef.current;
+
+    let emittedThisFrame = 0;
+    for (const source of sources) {
+      const desired = Math.min(
+        particleLimit,
+        Math.max(
+          1,
+          Math.floor(source.amount * particleYield + 0.0001),
+        ),
+      );
+      let emitted = sim.emittedByFruit.get(source.id) ?? 0;
+      while (
+        emitted < desired &&
+        emittedThisFrame < 18 &&
+        sim.count < particleLimit
+      ) {
+        const index = sim.count++;
+        const offset = index * 3;
+        const angle = source.phase + emitted * 2.399;
+        const jitter = 0.014 + (emitted % 5) * 0.006;
+        const speedBand = ((emitted * 13 + source.id) % 9) / 8;
+        const sourceColor = new THREE.Color(source.color);
+
+        sim.positions[offset] = rim.x + Math.cos(angle) * jitter;
+        sim.positions[offset + 1] = rim.y + 0.015 + (emitted % 3) * 0.008;
+        sim.positions[offset + 2] = rim.z + Math.sin(angle) * jitter;
+        sim.previous[offset] = sim.positions[offset];
+        sim.previous[offset + 1] = sim.positions[offset + 1];
+        sim.previous[offset + 2] = sim.positions[offset + 2];
+        sim.velocities[offset] =
+          Math.cos(angle) * (0.12 + speedBand * 0.22);
+        sim.velocities[offset + 1] = -0.42 - speedBand * 0.28;
+        sim.velocities[offset + 2] = 0.88 + speedBand * 1.05;
+        sim.colors[offset] = sourceColor.r;
+        sim.colors[offset + 1] = sourceColor.g;
+        sim.colors[offset + 2] = sourceColor.b;
+        sim.ages[index] = 0;
+        sim.surface[index] = 0;
+        sim.frozen = false;
+        sim.settledFrames = 0;
+        emitted += 1;
+        emittedThisFrame += 1;
+      }
+      sim.emittedByFruit.set(source.id, emitted);
+    }
+
+    ripple.visible = flowRef.current > 0.035;
+    if (ripple.visible) {
+      ripple.position.set(
+        rim.x,
+        COUNTER_TOP_Y + 0.018,
+        Math.min(2.18, rim.z + 0.34),
+      );
+      const rippleScale =
+        reducedMotion
+          ? 0.7
+          : 0.64 +
+            Math.sin(state.clock.elapsedTime * 9) *
+              0.09 *
+              flowRef.current;
+      ripple.scale.setScalar(rippleScale);
+      ripple.rotation.z += frameDelta * (reducedMotion ? 0.1 : 1.3);
+    }
+
+    const expectedParticleCount = Math.min(
+      particleLimit,
+      sources.reduce(
+        (sum, source) =>
+          sum +
+          Math.max(
+            1,
+            Math.floor(source.amount * particleYield + 0.0001),
+          ),
+        0,
+      ),
+    );
+    if (sim.count > 0 && !sim.frozen) {
+      const frameDt = Math.min(frameDelta, 1 / 30);
+      sim.accumulator = Math.min(sim.accumulator + frameDt, 1 / 30);
+      const fixedDt = 1 / 60;
+      const maximumSteps = 2;
+      let steps = 0;
+
+      while (sim.accumulator >= fixedDt && steps < maximumSteps) {
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          sim.previous[offset] = sim.positions[offset];
+          sim.previous[offset + 1] = sim.positions[offset + 1];
+          sim.previous[offset + 2] = sim.positions[offset + 2];
+          sim.velocities[offset + 1] -= 8.2 * fixedDt;
+          sim.positions[offset] += sim.velocities[offset] * fixedDt;
+          sim.positions[offset + 1] +=
+            sim.velocities[offset + 1] * fixedDt;
+          sim.positions[offset + 2] +=
+            sim.velocities[offset + 2] * fixedDt;
+        }
+
+        for (let iteration = 0; iteration < 2; iteration += 1) {
+          const hash = hashRef.current;
+          hash.clear();
+          const cellSize = 0.15;
+
+          for (let index = 0; index < sim.count; index += 1) {
+            const offset = index * 3;
+            const cellX = Math.floor(sim.positions[offset] / cellSize);
+            const cellY = Math.floor(
+              sim.positions[offset + 1] / cellSize,
+            );
+            const cellZ = Math.floor(
+              sim.positions[offset + 2] / cellSize,
+            );
+            const key = spillHashKey(cellX, cellY, cellZ);
+            const bucket = hash.get(key);
+            if (bucket) bucket.push(index);
+            else hash.set(key, [index]);
+          }
+
+          for (let a = 0; a < sim.count; a += 1) {
+            const aOffset = a * 3;
+            const cellX = Math.floor(sim.positions[aOffset] / cellSize);
+            const cellY = Math.floor(
+              sim.positions[aOffset + 1] / cellSize,
+            );
+            const cellZ = Math.floor(
+              sim.positions[aOffset + 2] / cellSize,
+            );
+
+            for (let xStep = -1; xStep <= 1; xStep += 1) {
+              for (let yStep = -1; yStep <= 1; yStep += 1) {
+                for (let zStep = -1; zStep <= 1; zStep += 1) {
+                  const bucket = hash.get(
+                    spillHashKey(
+                      cellX + xStep,
+                      cellY + yStep,
+                      cellZ + zStep,
+                    ),
+                  );
+                  if (!bucket) continue;
+                  for (const b of bucket) {
+                    if (b <= a) continue;
+                    const bOffset = b * 3;
+                    const dx =
+                      sim.positions[bOffset] - sim.positions[aOffset];
+                    const dy =
+                      sim.positions[bOffset + 1] -
+                      sim.positions[aOffset + 1];
+                    const dz =
+                      sim.positions[bOffset + 2] -
+                      sim.positions[aOffset + 2];
+                    const distanceSquared = dx * dx + dy * dy + dz * dz;
+                    if (
+                      distanceSquared <= 0.000001 ||
+                      distanceSquared >= cellSize * cellSize
+                    ) {
+                      continue;
+                    }
+                    const distance = Math.sqrt(distanceSquared);
+                    const normalX = dx / distance;
+                    const normalY = dy / distance;
+                    const normalZ = dz / distance;
+                    const minimumDistance = 0.092;
+
+                    if (distance < minimumDistance) {
+                      const correction =
+                        (minimumDistance - distance) * 0.46;
+                      sim.positions[aOffset] -= normalX * correction;
+                      sim.positions[aOffset + 1] -= normalY * correction;
+                      sim.positions[aOffset + 2] -= normalZ * correction;
+                      sim.positions[bOffset] += normalX * correction;
+                      sim.positions[bOffset + 1] += normalY * correction;
+                      sim.positions[bOffset + 2] += normalZ * correction;
+                    } else if (iteration === 1) {
+                      const cohesion =
+                        (1 - distance / cellSize) * 0.0015;
+                      sim.positions[aOffset] += normalX * cohesion;
+                      sim.positions[aOffset + 1] += normalY * cohesion;
+                      sim.positions[aOffset + 2] += normalZ * cohesion;
+                      sim.positions[bOffset] -= normalX * cohesion;
+                      sim.positions[bOffset + 1] -= normalY * cohesion;
+                      sim.positions[bOffset + 2] -= normalZ * cohesion;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          for (let index = 0; index < sim.count; index += 1) {
+            const offset = index * 3;
+            let x = sim.positions[offset];
+            let y = sim.positions[offset + 1];
+            let z = sim.positions[offset + 2];
+            const wasSurface = sim.surface[index];
+            const overCounter =
+              Math.abs(x) < 5.5 - SPILL_PARTICLE_RADIUS &&
+              Math.abs(z) < 2.46 - SPILL_PARTICLE_RADIUS;
+            sim.surface[index] = 0;
+
+            if (
+              overCounter &&
+              y < COUNTER_TOP_Y + SPILL_PARTICLE_RADIUS
+            ) {
+              y = COUNTER_TOP_Y + SPILL_PARTICLE_RADIUS * 0.22;
+              sim.surface[index] = 1;
+              if (wasSurface === 0) {
+                const splashAngle = index * 2.399;
+                const splash = 0.012 + (index % 4) * 0.006;
+                x += Math.cos(splashAngle) * splash;
+                z += 0.018 + Math.sin(splashAngle) * splash;
+              }
+
+              const pushOutCircle = (
+                centerX: number,
+                centerZ: number,
+                radius: number,
+              ) => {
+                const dx = x - centerX;
+                const dz = z - centerZ;
+                const distance = Math.max(0.0001, Math.hypot(dx, dz));
+                const limit = radius + SPILL_PARTICLE_RADIUS * 0.3;
+                if (distance >= limit) return;
+                x = centerX + (dx / distance) * limit;
+                z = centerZ + (dz / distance) * limit;
+              };
+              pushOutCircle(BLENDER_X, 0, 0.88 * blenderSize);
+              pushOutCircle(3.55, 0.32, 0.8);
+              pushOutCircle(CUP_POSITION.x, 0.72, 0.38);
+            } else if (
+              y < -2.115 + SPILL_PARTICLE_RADIUS
+            ) {
+              y = -2.115 + SPILL_PARTICLE_RADIUS * 0.22;
+              sim.surface[index] = 2;
+            }
+
+            sim.positions[offset] = x;
+            sim.positions[offset + 1] = y;
+            sim.positions[offset + 2] = z;
+          }
+        }
+
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          sim.velocities[offset] =
+            (sim.positions[offset] - sim.previous[offset]) / fixedDt;
+          sim.velocities[offset + 1] =
+            (sim.positions[offset + 1] - sim.previous[offset + 1]) /
+            fixedDt;
+          sim.velocities[offset + 2] =
+            (sim.positions[offset + 2] - sim.previous[offset + 2]) /
+            fixedDt;
+
+          if (sim.surface[index] === 1) {
+            sim.velocities[offset] *= 0.976;
+            sim.velocities[offset + 1] = 0;
+            sim.velocities[offset + 2] *= 0.976;
+          } else if (sim.surface[index] === 2) {
+            sim.velocities[offset] *= 0.9;
+            sim.velocities[offset + 1] = 0;
+            sim.velocities[offset + 2] *= 0.9;
+          } else {
+            sim.velocities[offset] *= 0.995;
+            sim.velocities[offset + 1] *= 0.995;
+            sim.velocities[offset + 2] *= 0.995;
+          }
+        }
+
+        const viscosityHash = hashRef.current;
+        viscosityHash.clear();
+        const viscosityRadius = 0.15;
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          const key = spillHashKey(
+            Math.floor(sim.positions[offset] / viscosityRadius),
+            Math.floor(sim.positions[offset + 1] / viscosityRadius),
+            Math.floor(sim.positions[offset + 2] / viscosityRadius),
+          );
+          const bucket = viscosityHash.get(key);
+          if (bucket) bucket.push(index);
+          else viscosityHash.set(key, [index]);
+        }
+
+        for (let a = 0; a < sim.count; a += 1) {
+          const aOffset = a * 3;
+          const cellX = Math.floor(
+            sim.positions[aOffset] / viscosityRadius,
+          );
+          const cellY = Math.floor(
+            sim.positions[aOffset + 1] / viscosityRadius,
+          );
+          const cellZ = Math.floor(
+            sim.positions[aOffset + 2] / viscosityRadius,
+          );
+          for (let xStep = -1; xStep <= 1; xStep += 1) {
+            for (let yStep = -1; yStep <= 1; yStep += 1) {
+              for (let zStep = -1; zStep <= 1; zStep += 1) {
+                const bucket = viscosityHash.get(
+                  spillHashKey(
+                    cellX + xStep,
+                    cellY + yStep,
+                    cellZ + zStep,
+                  ),
+                );
+                if (!bucket) continue;
+                for (const b of bucket) {
+                  if (b <= a) continue;
+                  const bOffset = b * 3;
+                  const dx =
+                    sim.positions[bOffset] - sim.positions[aOffset];
+                  const dy =
+                    sim.positions[bOffset + 1] -
+                    sim.positions[aOffset + 1];
+                  const dz =
+                    sim.positions[bOffset + 2] -
+                    sim.positions[aOffset + 2];
+                  const distance = Math.hypot(dx, dy, dz);
+                  if (
+                    distance <= 0.0001 ||
+                    distance >= viscosityRadius
+                  ) {
+                    continue;
+                  }
+                  const q = 1 - distance / viscosityRadius;
+                  const mix = 0.05 * q * q;
+                  const differenceX =
+                    (sim.velocities[bOffset] -
+                      sim.velocities[aOffset]) *
+                    mix;
+                  const differenceY =
+                    (sim.velocities[bOffset + 1] -
+                      sim.velocities[aOffset + 1]) *
+                    mix;
+                  const differenceZ =
+                    (sim.velocities[bOffset + 2] -
+                      sim.velocities[aOffset + 2]) *
+                    mix;
+                  sim.velocities[aOffset] += differenceX;
+                  sim.velocities[aOffset + 1] += differenceY;
+                  sim.velocities[aOffset + 2] += differenceZ;
+                  sim.velocities[bOffset] -= differenceX;
+                  sim.velocities[bOffset + 1] -= differenceY;
+                  sim.velocities[bOffset + 2] -= differenceZ;
+                }
+              }
+            }
+          }
+        }
+
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          const speed = Math.hypot(
+            sim.velocities[offset],
+            sim.velocities[offset + 1],
+            sim.velocities[offset + 2],
+          );
+          if (speed > 5.5) {
+            const scale = 5.5 / speed;
+            sim.velocities[offset] *= scale;
+            sim.velocities[offset + 1] *= scale;
+            sim.velocities[offset + 2] *= scale;
+          }
+          sim.ages[index] += fixedDt;
+        }
+
+        sim.accumulator -= fixedDt;
+        steps += 1;
+      }
+
+      let maximumSpeed = 0;
+      for (let index = 0; index < sim.count; index += 1) {
+        const offset = index * 3;
+        maximumSpeed = Math.max(
+          maximumSpeed,
+          Math.hypot(
+            sim.velocities[offset],
+            sim.velocities[offset + 1],
+            sim.velocities[offset + 2],
+          ),
+        );
+      }
+      if (
+        spillMode === "settling" &&
+        sim.count >= expectedParticleCount &&
+        maximumSpeed < 0.045
+      ) {
+        sim.settledFrames += 1;
+        if (sim.settledFrames > 60) {
+          sim.frozen = true;
+          onSettled();
+        }
+      } else {
+        sim.settledFrames = 0;
+      }
+    }
+
+    mesh.count = sim.count;
+    for (let index = 0; index < sim.count; index += 1) {
+      const offset = index * 3;
+      const surface = sim.surface[index];
+      particleColor
+        .setRGB(
+          sim.colors[offset],
+          sim.colors[offset + 1],
+          sim.colors[offset + 2],
+        )
+        .lerp(mixColor, Math.min(0.78, sim.ages[index] * 0.45));
+      dummy.position.set(
+        sim.positions[offset],
+        sim.positions[offset + 1],
+        sim.positions[offset + 2],
+      );
+      if (surface > 0) {
+        dummy.quaternion.identity();
+        const puddlePulse =
+          reducedMotion
+            ? 1
+            : 0.94 + Math.sin(index * 1.7 + state.clock.elapsedTime * 3) * 0.06;
+        dummy.scale.set(
+          1.35 * puddlePulse,
+          0.2 + (1 - spillFraction) * 0.04,
+          1.35 / puddlePulse,
+        );
+      } else {
+        velocityDirection.set(
+          sim.velocities[offset],
+          sim.velocities[offset + 1],
+          sim.velocities[offset + 2],
+        );
+        const speed = velocityDirection.length();
+        if (speed > 0.001) {
+          dummy.quaternion.setFromUnitVectors(
+            up,
+            velocityDirection.normalize(),
+          );
+        } else {
+          dummy.quaternion.identity();
+        }
+        dummy.scale.set(
+          0.78,
+          reducedMotion ? 1 : 1.05 + Math.min(0.85, speed * 0.16),
+          0.78,
+        );
+      }
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+      mesh.setColorAt(index, particleColor);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  });
+
+  return (
+    <group>
+      <mesh
+        ref={impactRippleRef}
+        visible={false}
+        rotation={[Math.PI / 2, 0, 0]}
+        renderOrder={7}
+      >
+        <torusGeometry args={[0.24, 0.028, 10, 36]} />
+        <meshPhysicalMaterial
+          color={color}
+          transparent
+          opacity={0.68}
+          roughness={0.12}
+          clearcoat={0.7}
+          depthWrite={false}
+        />
+      </mesh>
+      <instancedMesh
+        ref={particlesRef}
+        args={[undefined, undefined, MAX_SPILL_PARTICLES]}
+        count={0}
+        frustumCulled={false}
+        renderOrder={6}
+      >
+        <icosahedronGeometry args={[SPILL_PARTICLE_RADIUS, 1]} />
+        <meshPhysicalMaterial
+          vertexColors
+          transparent
+          opacity={0.84}
+          roughness={0.14}
+          clearcoat={0.72}
+          clearcoatRoughness={0.16}
+          depthWrite={false}
+        />
+      </instancedMesh>
     </group>
   );
 }
@@ -2754,7 +3823,7 @@ function JuiceFluid({
       );
     }
 
-    if (sim.count > 0) {
+    if (sim.count > 0 && remainingUnits > 0.001) {
       sim.accumulator = Math.min(sim.accumulator + frameDt, 1 / 30);
       const fixedDt = 1 / 60;
       let steps = 0;
@@ -2987,6 +4056,8 @@ function JuiceFluid({
       if (particleMesh.instanceColor) {
         particleMesh.instanceColor.needsUpdate = true;
       }
+    } else {
+      particleMesh.count = 0;
     }
   });
 

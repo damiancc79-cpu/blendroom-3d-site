@@ -479,6 +479,19 @@ button {
   transform: translateY(-2px);
 }
 
+.serve-panel.is-spill-ready {
+  border-color: rgba(219, 88, 73, 0.68);
+  box-shadow:
+    0 20px 52px rgba(91, 65, 43, 0.18),
+    0 0 0 4px rgba(219, 88, 73, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.serve-panel.is-spilling {
+  border-color: rgba(219, 88, 73, 0.54);
+  background: rgba(255, 247, 237, 0.9);
+}
+
 .serve-cup-glyph {
   position: relative;
   width: 42px;
@@ -489,6 +502,12 @@ button {
   border-radius: 5px 5px 13px 13px;
   background: rgba(220, 244, 242, 0.3);
   clip-path: polygon(7% 0, 93% 0, 83% 100%, 17% 100%);
+  transform-origin: 50% 92%;
+  transition: transform 260ms ease;
+}
+
+.serve-cup-glyph.is-tipped {
+  transform: rotate(68deg);
 }
 
 .serve-cup-glyph::after {
@@ -611,6 +630,19 @@ button {
   border-color: rgba(239, 139, 93, 0.64);
   color: #b64e3c;
   opacity: 1;
+}
+
+.cup-badge.is-spilling {
+  border-color: rgba(219, 88, 73, 0.66);
+  background: rgba(255, 244, 232, 0.92);
+  color: #a63f35;
+}
+
+@media (min-width: 881px) {
+  .serve-panel.is-spilling {
+    right: auto;
+    left: max(22px, env(safe-area-inset-left));
+  }
 }
 
 .webgl-fallback {

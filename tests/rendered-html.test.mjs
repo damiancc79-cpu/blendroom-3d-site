@@ -34,7 +34,7 @@ test("server-renders the Blendroom experience and social metadata", async () => 
     html,
     /<h1[^>]*>Blend what(?:'|&#x27;)s fresh\.<\/h1>/i,
   );
-  assert.match(html, /grab fruit, blend it, then drag the glass jug/);
+  assert.match(html, /blend fruit, serve it, then tip the crystal cup/i);
   assert.match(html, /aria-label="Mute motor sound"/);
   assert.match(
     html,
@@ -42,7 +42,7 @@ test("server-renders the Blendroom experience and social metadata", async () => 
   );
   assert.match(
     html,
-    /Blend until smooth, then drag the glass jug to the crystal cup\./,
+    /Blend, pour, then click the crystal cup and watch fluid physics take over\./,
   );
   assert.match(
     html,
@@ -58,7 +58,7 @@ test("server-renders the Blendroom experience and social metadata", async () => 
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
-test("keeps the contained fluid simulation and preview asset in source", async () => {
+test("keeps the contained and spilled fluid simulations in source", async () => {
   const [studio, layout, image] = await Promise.all([
     readFile(new URL("../app/BlenderStudio.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -67,9 +67,27 @@ test("keeps the contained fluid simulation and preview asset in source", async (
 
   assert.match(studio, /juice:\s*number/);
   assert.match(studio, /poured:\s*number/);
+  assert.match(studio, /spilled:\s*number/);
+  assert.match(studio, /type SpillMode/);
   assert.match(studio, /function JuiceFluid\(/);
   assert.match(studio, /function CrystalCup\(/);
   assert.match(studio, /function PourStream\(/);
+  assert.match(studio, /function CupSpillStream\(/);
+  assert.match(studio, /function SpillFluidSimulation\(/);
+  assert.match(studio, /function spillHashKey\(/);
+  assert.match(studio, /MAX_SPILL_PARTICLES\s*=\s*220/);
+  assert.match(studio, /COUNTER_TOP_Y\s*=\s*0\.035/);
+  assert.match(studio, /spilled:\s*fruit\.poured/);
+  assert.match(studio, /Spill all smoothie from the crystal cup onto the counter/);
+  assert.match(studio, /Smoothie spilled; clear the batch to reset/);
+  assert.match(studio, /Click the cup to spill it/);
+  assert.match(studio, /spillMode === "spilling"/);
+  assert.match(studio, /const maximumSteps\s*=\s*2/);
+  assert.match(studio, /sources\.reduce\(/);
+  assert.match(studio, /onSettled\(\)/);
+  assert.match(studio, /sim\.velocities\[offset \+ 1\]\s*-=\s*8\.2/);
+  assert.match(studio, /pushOutCircle\(BLENDER_X/);
+  assert.match(studio, /Math\.abs\(z\)\s*<\s*2\.46/);
   assert.match(studio, /CUP_CAPACITY\s*=\s*5/);
   assert.match(studio, /POUR_RATE\s*=\s*1\.65/);
   assert.match(studio, /setPointerCapture\(event\.pointerId\)/);
