@@ -13,9 +13,33 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    "https://blendroom-3d-kitchen.damiancc79.chatgpt.site",
+  ),
   title: "Blendroom — 3D Fruit Blender",
   description:
-    "Add fruit, drag it into the jug, resize your blender, and whirl up a smoothie in a sunlit 3D kitchen.",
+    "Add fruit, drag it into the jug, resize your blender, and watch it become swirling juice in a sunlit 3D kitchen.",
+  openGraph: {
+    title: "Blendroom — 3D Fruit Blender",
+    description:
+      "Drag in fruit and blend it into a colorful contained juice vortex.",
+    type: "website",
+    images: [
+      {
+        url: "/og.png",
+        width: 1200,
+        height: 630,
+        alt: "Blendroom blender mixing a rainbow fruit vortex in a warm kitchen",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Blendroom — 3D Fruit Blender",
+    description:
+      "Drag in fruit and blend it into a colorful contained juice vortex.",
+    images: ["/og.png"],
+  },
 };
 
 export default function RootLayout({

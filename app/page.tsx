@@ -4,7 +4,7 @@ import BlenderStudio from "./BlenderStudio";
 export const metadata: Metadata = {
   title: "Blendroom — 3D Fruit Blender",
   description:
-    "A playful 3D kitchen where you can add fruit, drag it into the jug, resize the blender, and make a smoothie.",
+    "A playful 3D kitchen where fruit becomes a colorful contained juice vortex inside an editable blender.",
 };
 
 export default function Home() {

@@ -30,6 +30,7 @@ type FruitItem = {
   position: [number, number, number];
   inJar: boolean;
   phase: number;
+  juice: number;
 };
 
 type FruitDefinition = {
@@ -37,6 +38,14 @@ type FruitDefinition = {
   label: string;
   icon: string;
   color: string;
+};
+
+type JuiceSource = {
+  id: number;
+  type: FruitType;
+  color: string;
+  phase: number;
+  juice: number;
 };
 
 const FRUIT: FruitDefinition[] = [
@@ -53,6 +62,10 @@ const FRUIT_COLORS = Object.fromEntries(
 
 const BLENDER_X = 0.45;
 const MAX_FRUIT = 12;
+const MAX_JUICE_PARTICLES = 240;
+const JAR_FLUID_BOTTOM = 1.17;
+const JAR_FLUID_TOP = 3.02;
+const JUICE_PARTICLE_RADIUS = 0.052;
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
@@ -99,12 +112,17 @@ function reflowBoard(fruits: FruitItem[]) {
 }
 
 function smoothieColor(fruits: FruitItem[]) {
-  const inside = fruits.filter((fruit) => fruit.inJar);
-  if (!inside.length) return "#e9895c";
+  const inside = fruits.filter((fruit) => fruit.inJar && fruit.juice > 0);
+  const totalJuice = inside.reduce((sum, fruit) => sum + fruit.juice, 0);
+  if (!totalJuice) return "#e9895c";
 
   const color = new THREE.Color(0, 0, 0);
-  inside.forEach((fruit) => color.add(new THREE.Color(FRUIT_COLORS[fruit.type])));
-  color.multiplyScalar(1 / inside.length);
+  inside.forEach((fruit) =>
+    color.add(
+      new THREE.Color(FRUIT_COLORS[fruit.type]).multiplyScalar(fruit.juice),
+    ),
+  );
+  color.multiplyScalar(1 / totalJuice);
   color.lerp(new THREE.Color("#f5d6a2"), 0.18);
   return `#${color.getHexString()}`;
 }
@@ -113,25 +131,39 @@ export default function BlenderStudio() {
   const [fruits, setFruits] = useState<FruitItem[]>([]);
   const [blenderSize, setBlenderSize] = useState(1);
   const [blending, setBlending] = useState(false);
-  const [blendProgress, setBlendProgress] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [muted, setMuted] = useState(false);
   const [liveMessage, setLiveMessage] = useState(
     "Choose a fruit to begin your blend.",
   );
   const nextId = useRef(1);
+  const completionScheduled = useRef(false);
   const reducedMotion = useReducedMotion();
-  const insideCount = fruits.filter((fruit) => fruit.inJar).length;
+  const insideFruits = fruits.filter((fruit) => fruit.inJar);
+  const insideCount = insideFruits.length;
   const onBoardCount = fruits.length - insideCount;
+  const blendProgress = insideCount
+    ? insideFruits.reduce((sum, fruit) => sum + fruit.juice, 0) / insideCount
+    : 0;
+  const blendComplete =
+    insideCount > 0 && insideFruits.every((fruit) => fruit.juice >= 0.995);
   const color = useMemo(() => smoothieColor(fruits), [fruits]);
 
   useEffect(() => {
     if (!blending) return;
+    completionScheduled.current = false;
     const timer = window.setInterval(() => {
-      setBlendProgress((progress) => {
-        const next = Math.min(1, progress + 0.018);
-        if (next >= 1) {
-          window.clearInterval(timer);
+      setFruits((current) => {
+        const next = current.map((fruit) =>
+          fruit.inJar
+            ? { ...fruit, juice: Math.min(1, fruit.juice + 0.018) }
+            : fruit,
+        );
+        const active = next.filter((fruit) => fruit.inJar);
+        const complete =
+          active.length > 0 && active.every((fruit) => fruit.juice >= 0.995);
+        if (complete && !completionScheduled.current) {
+          completionScheduled.current = true;
           window.setTimeout(() => {
             setBlending(false);
             setLiveMessage("Smoothie complete. Silky smooth.");
@@ -210,6 +242,7 @@ export default function BlenderStudio() {
           position: boardPosition(current.filter((fruit) => !fruit.inJar).length),
           inJar: false,
           phase: id * 1.71,
+          juice: 0,
         },
       ]);
       setLiveMessage(
@@ -254,7 +287,6 @@ export default function BlenderStudio() {
       });
 
       if (withinOpening) {
-        setBlendProgress((progress) => Math.max(0, progress - 0.34));
         setLiveMessage("Fruit dropped in. Ready to whirl.");
       } else {
         setLiveMessage("Fruit returned to the cutting board.");
@@ -280,7 +312,6 @@ export default function BlenderStudio() {
       );
       return reflowBoard(next);
     });
-    setBlendProgress((progress) => Math.max(0, progress - 0.34));
     setLiveMessage("One fruit moved into the jug. Ready to whirl.");
   }, [blenderSize, blending]);
 
@@ -315,7 +346,6 @@ export default function BlenderStudio() {
     }
     setBlending((running) => {
       const next = !running;
-      if (next && blendProgress >= 0.98) setBlendProgress(0.66);
       setLiveMessage(next ? "Blending started." : "Blending paused.");
       return next;
     });
@@ -323,7 +353,6 @@ export default function BlenderStudio() {
 
   const reset = () => {
     setBlending(false);
-    setBlendProgress(0);
     setFruits([]);
     setLiveMessage("Jug cleared. Choose a fruit for a fresh blend.");
   };
@@ -331,10 +360,12 @@ export default function BlenderStudio() {
   const phaseLabel =
     blendProgress >= 0.98
       ? "Silky smooth"
-      : blending && blendProgress > 0.55
-        ? "Vortex forming"
+      : blending && blendProgress > 0.62
+        ? "Fluid vortex"
+        : blending && blendProgress > 0.24
+          ? "Juice releasing"
         : blending
-          ? "Chopping fruit"
+          ? "Crushing fruit"
           : blendProgress > 0.02
             ? "Partly blended"
           : insideCount
@@ -507,15 +538,15 @@ export default function BlenderStudio() {
               type="button"
               className={`blend-button ${blending ? "is-running" : ""}`}
               onClick={toggleBlend}
-              disabled={!insideCount}
+              disabled={!insideCount || blendComplete}
             >
               <span className="power-glyph" aria-hidden="true">
                 {blending ? "■" : "▶"}
               </span>
               {blending
                 ? "Stop"
-                : blendProgress >= 0.98
-                  ? "Whirl again"
+                : blendComplete
+                  ? "Smooth!"
                   : blendProgress > 0
                     ? "Keep blending"
                     : "Blend now"}
@@ -564,6 +595,19 @@ function BlendroomScene({
   onFruitDrop,
 }: SceneProps) {
   const compact = useThree((state) => state.size.width < 880);
+  const juiceSources = useMemo(
+    () =>
+      fruits
+        .filter((fruit) => fruit.inJar)
+        .map((fruit) => ({
+          id: fruit.id,
+          type: fruit.type,
+          color: FRUIT_COLORS[fruit.type],
+          phase: fruit.phase,
+          juice: fruit.juice,
+        })),
+    [fruits],
+  );
 
   return (
     <>
@@ -598,6 +642,7 @@ function BlendroomScene({
         blendProgress={blendProgress}
         smoothieColor={color}
         fruitCount={fruits.filter((fruit) => fruit.inJar).length}
+        juiceSources={juiceSources}
         reducedMotion={reducedMotion}
       />
 
@@ -607,7 +652,6 @@ function BlendroomScene({
           fruit={fruit}
           blenderSize={blenderSize}
           blending={blending}
-          blendProgress={blendProgress}
           reducedMotion={reducedMotion}
           onDragging={onDragging}
           onDrop={onFruitDrop}
@@ -939,6 +983,7 @@ function BlenderRig({
   blendProgress,
   smoothieColor: color,
   fruitCount,
+  juiceSources,
   reducedMotion,
 }: {
   size: number;
@@ -946,12 +991,12 @@ function BlenderRig({
   blendProgress: number;
   smoothieColor: string;
   fruitCount: number;
+  juiceSources: JuiceSource[];
   reducedMotion: boolean;
 }) {
   const group = useRef<THREE.Group>(null);
   const blade = useRef<THREE.Group>(null);
   const lid = useRef<THREE.Group>(null);
-  const liquid = useRef<THREE.Mesh>(null);
   const rpm = useRef(0);
 
   const jarProfile = useMemo(
@@ -963,11 +1008,6 @@ function BlenderRig({
     ],
     [],
   );
-  const liquidHeight = Math.min(
-    1.52,
-    0.22 + fruitCount * 0.12 + blendProgress * 0.58,
-  );
-  const liquidCenter = 1.12 + liquidHeight / 2;
 
   useFrame((state, delta) => {
     const dt = Math.min(delta, 0.05);
@@ -1005,15 +1045,6 @@ function BlenderRig({
         8,
         dt,
       );
-    }
-    if (liquid.current) {
-      liquid.current.rotation.y +=
-        rpm.current * dt * (reducedMotion ? 0.25 : 2.3);
-      liquid.current.position.y =
-        liquidCenter +
-        Math.sin(state.clock.elapsedTime * 7) *
-          (reducedMotion ? 0.002 : 0.012) *
-          rpm.current;
     }
   });
 
@@ -1122,22 +1153,14 @@ function BlenderRig({
         </mesh>
       </group>
 
-      {fruitCount > 0 && blendProgress > 0.02 && (
-        <mesh
-          ref={liquid}
-          position={[0, liquidCenter, 0]}
-          scale={[1, liquidHeight, 1]}
-          renderOrder={1}
-        >
-          <cylinderGeometry args={[0.56, 0.48, 1, 48]} />
-          <meshPhysicalMaterial
-            color={color}
-            roughness={0.33}
-            transparent
-            opacity={Math.min(0.9, 0.38 + blendProgress * 0.55)}
-            thickness={0.5}
-          />
-        </mesh>
+      {fruitCount > 0 && (
+        <JuiceFluid
+          blending={blending}
+          blendProgress={blendProgress}
+          color={color}
+          sources={juiceSources}
+          reducedMotion={reducedMotion}
+        />
       )}
 
       <group ref={lid} position={[0.72, 3.45, 0]} rotation={[0, 0, -0.72]}>
@@ -1154,11 +1177,512 @@ function BlenderRig({
   );
 }
 
+type FluidState = {
+  count: number;
+  accumulator: number;
+  positions: Float32Array;
+  previous: Float32Array;
+  velocities: Float32Array;
+  colors: Float32Array;
+  ages: Float32Array;
+  emittedByFruit: Map<number, number>;
+};
+
+function jarInteriorRadius(y: number) {
+  const lowerY = 1.02;
+  const shoulderY = 1.14;
+  const upperY = 2.87;
+  let radius: number;
+
+  if (y <= shoulderY) {
+    const t = THREE.MathUtils.clamp(
+      (y - lowerY) / (shoulderY - lowerY),
+      0,
+      1,
+    );
+    radius = THREE.MathUtils.lerp(0.56, 0.6, t);
+  } else {
+    const t = THREE.MathUtils.clamp(
+      (y - shoulderY) / (upperY - shoulderY),
+      0,
+      1,
+    );
+    radius = THREE.MathUtils.lerp(0.6, 0.78, t);
+  }
+
+  return radius - 0.035 - JUICE_PARTICLE_RADIUS;
+}
+
+function JuiceFluid({
+  blending,
+  blendProgress,
+  color,
+  sources,
+  reducedMotion,
+}: {
+  blending: boolean;
+  blendProgress: number;
+  color: string;
+  sources: JuiceSource[];
+  reducedMotion: boolean;
+}) {
+  const compact = useThree((state) => state.size.width < 880);
+  const particleYield = reducedMotion ? 8 : compact ? 12 : 20;
+  const particleLimit = Math.min(
+    MAX_JUICE_PARTICLES,
+    particleYield * MAX_FRUIT,
+  );
+  const particles = useRef<THREE.InstancedMesh>(null);
+  const bulkLiquid = useRef<THREE.Mesh>(null);
+  const surface = useRef<THREE.Mesh>(null);
+  const surfaceShader = useRef<THREE.ShaderMaterial>(null);
+  const motor = useRef(0);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const mixColor = useMemo(() => new THREE.Color(color), [color]);
+  const particleColor = useMemo(() => new THREE.Color(), []);
+  const targetVelocity = useMemo(() => new THREE.Vector3(), []);
+  const surfaceUniforms = useMemo(
+    () => ({
+      uTime: { value: 0 },
+      uStrength: { value: 0 },
+      uColor: { value: new THREE.Color("#e9895c") },
+      uOpacity: { value: 0.86 },
+    }),
+    [],
+  );
+  const fluid = useRef<FluidState>({
+    count: 0,
+    accumulator: 0,
+    positions: new Float32Array(MAX_JUICE_PARTICLES * 3),
+    previous: new Float32Array(MAX_JUICE_PARTICLES * 3),
+    velocities: new Float32Array(MAX_JUICE_PARTICLES * 3),
+    colors: new Float32Array(MAX_JUICE_PARTICLES * 3),
+    ages: new Float32Array(MAX_JUICE_PARTICLES),
+    emittedByFruit: new Map(),
+  });
+
+  useEffect(() => {
+    const mesh = particles.current;
+    if (!mesh) return;
+    mesh.count = 0;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.setColorAt(0, new THREE.Color("#ffffff"));
+    if (mesh.instanceColor) {
+      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+      mesh.instanceColor.needsUpdate = true;
+    }
+    const material = mesh.material as THREE.Material;
+    material.needsUpdate = true;
+  }, []);
+
+  useFrame((state, frameDelta) => {
+    const sim = fluid.current;
+    const particleMesh = particles.current;
+    const bodyMesh = bulkLiquid.current;
+    const surfaceMesh = surface.current;
+    const surfaceMaterial = surfaceShader.current;
+    if (!particleMesh || !bodyMesh || !surfaceMesh || !surfaceMaterial) return;
+
+    const frameDt = Math.min(frameDelta, 0.033);
+    motor.current = THREE.MathUtils.damp(
+      motor.current,
+      blending ? 1 : 0,
+      reducedMotion ? 3.5 : 5.5,
+      frameDt,
+    );
+
+    let emittedThisFrame = 0;
+    for (const source of sources) {
+      const desired = Math.min(
+        particleYield,
+        Math.floor(source.juice * particleYield + 0.0001),
+      );
+      let emitted = sim.emittedByFruit.get(source.id) ?? 0;
+
+      while (
+        emitted < desired &&
+        emittedThisFrame < 8 &&
+        sim.count < particleLimit
+      ) {
+        const index = sim.count++;
+        const offset = index * 3;
+        const angle =
+          source.phase + emitted * 1.73 + source.juice * Math.PI * 4.2;
+        const spawnRadius = 0.12 + ((emitted * 17) % 8) * 0.022;
+        const spawnY =
+          1.34 + ((emitted * 7 + source.id) % 6) * 0.055 + source.juice * 0.08;
+        const sourceColor = new THREE.Color(source.color);
+
+        sim.positions[offset] = Math.cos(angle) * spawnRadius;
+        sim.positions[offset + 1] = spawnY;
+        sim.positions[offset + 2] = Math.sin(angle) * spawnRadius;
+        sim.velocities[offset] = -Math.sin(angle) * 0.72;
+        sim.velocities[offset + 1] = 0.12 + (emitted % 3) * 0.05;
+        sim.velocities[offset + 2] = Math.cos(angle) * 0.72;
+        sim.colors[offset] = sourceColor.r;
+        sim.colors[offset + 1] = sourceColor.g;
+        sim.colors[offset + 2] = sourceColor.b;
+        sim.ages[index] = 0;
+        emitted += 1;
+        emittedThisFrame += 1;
+      }
+
+      sim.emittedByFruit.set(source.id, emitted);
+    }
+
+    const fillUnits = sim.count / Math.max(1, particleYield);
+    const fillHeight =
+      sim.count > 0 ? Math.min(1.65, 0.05 + fillUnits * 0.13) : 0;
+    const fillTop = JAR_FLUID_BOTTOM + fillHeight;
+    const surfaceRadius = Math.max(
+      0.42,
+      jarInteriorRadius(Math.max(JAR_FLUID_BOTTOM, fillTop)) -
+        JUICE_PARTICLE_RADIUS * 0.25,
+    );
+    const fluidVisible = sim.count > 0;
+
+    bodyMesh.visible = fluidVisible;
+    surfaceMesh.visible = fluidVisible;
+    if (fluidVisible) {
+      bodyMesh.position.y = JAR_FLUID_BOTTOM + fillHeight * 0.5;
+      bodyMesh.scale.set(
+        surfaceRadius / 0.69,
+        Math.max(0.001, fillHeight),
+        surfaceRadius / 0.69,
+      );
+      surfaceMesh.position.y = fillTop + 0.008;
+      surfaceMesh.scale.setScalar(surfaceRadius);
+      const bodyMaterial = bodyMesh.material as THREE.MeshPhysicalMaterial;
+      bodyMaterial.color.lerp(mixColor, 1 - Math.exp(-frameDt * 6));
+      surfaceMaterial.uniforms.uTime.value = state.clock.elapsedTime;
+      surfaceMaterial.uniforms.uStrength.value = THREE.MathUtils.damp(
+        surfaceMaterial.uniforms.uStrength.value,
+        motor.current * (reducedMotion ? 0.32 : 1),
+        5,
+        frameDt,
+      );
+      (
+        surfaceMaterial.uniforms.uColor.value as THREE.Color
+      ).lerp(mixColor, 1 - Math.exp(-frameDt * 6));
+      surfaceMaterial.uniforms.uOpacity.value = THREE.MathUtils.lerp(
+        0.75,
+        0.9,
+        blendProgress,
+      );
+    }
+
+    if (sim.count > 0) {
+      sim.accumulator = Math.min(sim.accumulator + frameDt, 1 / 30);
+      const fixedDt = 1 / 60;
+      let steps = 0;
+
+      while (sim.accumulator >= fixedDt && steps < 2) {
+        const topBoundary = Math.min(
+          JAR_FLUID_TOP,
+          Math.max(1.42, fillTop + (blending ? 0.32 : 0.12)),
+        );
+
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          const x = sim.positions[offset];
+          const y = sim.positions[offset + 1];
+          const z = sim.positions[offset + 2];
+          const vx = sim.velocities[offset];
+          const vy = sim.velocities[offset + 1];
+          const vz = sim.velocities[offset + 2];
+          const radial = Math.max(0.0001, Math.hypot(x, z));
+          const radiusLimit = jarInteriorRadius(y);
+          const normalizedHeight = THREE.MathUtils.clamp(
+            (y - JAR_FLUID_BOTTOM) /
+              Math.max(0.2, topBoundary - JAR_FLUID_BOTTOM),
+            0,
+            1,
+          );
+          const wallRatio = THREE.MathUtils.clamp(
+            radial / Math.max(0.1, radiusLimit),
+            0,
+            1.4,
+          );
+          const circulation = motor.current * (reducedMotion ? 0.36 : 1);
+          const omega = 7.5 * circulation;
+          const radialFlow =
+            0.34 * circulation * (1 - normalizedHeight * 2);
+          const verticalFlow =
+            0.52 * circulation * (2 * wallRatio * wallRatio - 0.72);
+
+          targetVelocity.set(
+            -z * omega + (x / radial) * radialFlow,
+            verticalFlow,
+            x * omega + (z / radial) * radialFlow,
+          );
+
+          const forceGain = 7.5 * circulation;
+          sim.previous[offset] = x;
+          sim.previous[offset + 1] = y;
+          sim.previous[offset + 2] = z;
+          sim.velocities[offset] =
+            vx + (targetVelocity.x - vx) * forceGain * fixedDt;
+          sim.velocities[offset + 1] =
+            vy +
+            ((targetVelocity.y - vy) * forceGain - 0.62) * fixedDt;
+          sim.velocities[offset + 2] =
+            vz + (targetVelocity.z - vz) * forceGain * fixedDt;
+
+          if (y < 1.38 && circulation > 0.05) {
+            const bladeKick = (1.38 - y) * 3.5 * circulation;
+            sim.velocities[offset] +=
+              Math.cos(sim.ages[index] * 6 + index) * bladeKick * fixedDt;
+            sim.velocities[offset + 1] += bladeKick * 0.45 * fixedDt;
+            sim.velocities[offset + 2] +=
+              Math.sin(sim.ages[index] * 5 + index) * bladeKick * fixedDt;
+          }
+
+          const damping = reducedMotion ? 0.973 : 0.987;
+          sim.velocities[offset] *= damping;
+          sim.velocities[offset + 1] *= damping;
+          sim.velocities[offset + 2] *= damping;
+          sim.positions[offset] += sim.velocities[offset] * fixedDt;
+          sim.positions[offset + 1] += sim.velocities[offset + 1] * fixedDt;
+          sim.positions[offset + 2] += sim.velocities[offset + 2] * fixedDt;
+        }
+
+        for (let iteration = 0; iteration < 2; iteration += 1) {
+          for (let a = 0; a < sim.count; a += 1) {
+            const aOffset = a * 3;
+            for (let b = a + 1; b < sim.count; b += 1) {
+              const bOffset = b * 3;
+              const dx = sim.positions[bOffset] - sim.positions[aOffset];
+              const dy =
+                sim.positions[bOffset + 1] - sim.positions[aOffset + 1];
+              const dz =
+                sim.positions[bOffset + 2] - sim.positions[aOffset + 2];
+              const distanceSquared = dx * dx + dy * dy + dz * dz;
+              if (distanceSquared <= 0.000001 || distanceSquared > 0.034) {
+                continue;
+              }
+              const distance = Math.sqrt(distanceSquared);
+              const minimumDistance = JUICE_PARTICLE_RADIUS * 1.72;
+              if (distance >= minimumDistance) continue;
+              const correction =
+                ((minimumDistance - distance) / distance) * 0.22;
+              const correctionX = dx * correction;
+              const correctionY = dy * correction;
+              const correctionZ = dz * correction;
+              sim.positions[aOffset] -= correctionX;
+              sim.positions[aOffset + 1] -= correctionY;
+              sim.positions[aOffset + 2] -= correctionZ;
+              sim.positions[bOffset] += correctionX;
+              sim.positions[bOffset + 1] += correctionY;
+              sim.positions[bOffset + 2] += correctionZ;
+            }
+          }
+
+          for (let index = 0; index < sim.count; index += 1) {
+            const offset = index * 3;
+            let x = sim.positions[offset];
+            let y = sim.positions[offset + 1];
+            let z = sim.positions[offset + 2];
+
+            if (y < JAR_FLUID_BOTTOM) {
+              y = JAR_FLUID_BOTTOM;
+              if (sim.velocities[offset + 1] < 0) {
+                sim.velocities[offset + 1] *= -0.08;
+              }
+            } else if (y > topBoundary) {
+              y = topBoundary;
+              if (sim.velocities[offset + 1] > 0) {
+                sim.velocities[offset + 1] *= -0.08;
+              }
+            }
+
+            const radial = Math.max(0.0001, Math.hypot(x, z));
+            const radiusLimit = jarInteriorRadius(y);
+            if (radial > radiusLimit) {
+              const normalX = x / radial;
+              const normalZ = z / radial;
+              x = normalX * radiusLimit;
+              z = normalZ * radiusLimit;
+              const outwardVelocity =
+                sim.velocities[offset] * normalX +
+                sim.velocities[offset + 2] * normalZ;
+              if (outwardVelocity > 0) {
+                sim.velocities[offset] -= outwardVelocity * 1.05 * normalX;
+                sim.velocities[offset + 2] -= outwardVelocity * 1.05 * normalZ;
+              }
+              sim.velocities[offset] *= 0.94;
+              sim.velocities[offset + 2] *= 0.94;
+            }
+
+            sim.positions[offset] = x;
+            sim.positions[offset + 1] = y;
+            sim.positions[offset + 2] = z;
+          }
+        }
+
+        for (let index = 0; index < sim.count; index += 1) {
+          const offset = index * 3;
+          const recoveredX =
+            (sim.positions[offset] - sim.previous[offset]) / fixedDt;
+          const recoveredY =
+            (sim.positions[offset + 1] - sim.previous[offset + 1]) / fixedDt;
+          const recoveredZ =
+            (sim.positions[offset + 2] - sim.previous[offset + 2]) / fixedDt;
+          sim.velocities[offset] = THREE.MathUtils.lerp(
+            recoveredX,
+            sim.velocities[offset],
+            0.12,
+          );
+          sim.velocities[offset + 1] = THREE.MathUtils.lerp(
+            recoveredY,
+            sim.velocities[offset + 1],
+            0.12,
+          );
+          sim.velocities[offset + 2] = THREE.MathUtils.lerp(
+            recoveredZ,
+            sim.velocities[offset + 2],
+            0.12,
+          );
+          const speed = Math.hypot(
+            sim.velocities[offset],
+            sim.velocities[offset + 1],
+            sim.velocities[offset + 2],
+          );
+          if (speed > 4.5) {
+            const scale = 4.5 / speed;
+            sim.velocities[offset] *= scale;
+            sim.velocities[offset + 1] *= scale;
+            sim.velocities[offset + 2] *= scale;
+          }
+          sim.ages[index] += fixedDt;
+        }
+
+        sim.accumulator -= fixedDt;
+        steps += 1;
+      }
+
+      particleMesh.count = sim.count;
+      for (let index = 0; index < sim.count; index += 1) {
+        const offset = index * 3;
+        const mixing = Math.min(
+          0.76,
+          sim.ages[index] * (blending ? 0.16 : 0.045),
+        );
+        particleColor
+          .setRGB(
+            sim.colors[offset],
+            sim.colors[offset + 1],
+            sim.colors[offset + 2],
+          )
+          .lerp(mixColor, mixing);
+        dummy.position.set(
+          sim.positions[offset],
+          sim.positions[offset + 1],
+          sim.positions[offset + 2],
+        );
+        const pulse =
+          reducedMotion
+            ? 0.9
+            : 0.86 + Math.sin(sim.ages[index] * 7 + index) * 0.08;
+        dummy.scale.setScalar(pulse);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        particleMesh.setMatrixAt(index, dummy.matrix);
+        particleMesh.setColorAt(index, particleColor);
+      }
+      particleMesh.instanceMatrix.needsUpdate = true;
+      if (particleMesh.instanceColor) {
+        particleMesh.instanceColor.needsUpdate = true;
+      }
+    }
+  });
+
+  return (
+    <group>
+      <mesh ref={bulkLiquid} visible={false} renderOrder={1}>
+        <cylinderGeometry args={[0.69, 0.5, 1, 48, 1, false]} />
+        <meshPhysicalMaterial
+          color={color}
+          transparent
+          opacity={0.66}
+          roughness={0.22}
+          transmission={0.08}
+          thickness={0.18}
+          depthWrite={false}
+        />
+      </mesh>
+      <mesh
+        ref={surface}
+        visible={false}
+        rotation={[-Math.PI / 2, 0, 0]}
+        renderOrder={2}
+      >
+        <circleGeometry args={[1, 56]} />
+        <shaderMaterial
+          ref={surfaceShader}
+          uniforms={surfaceUniforms}
+          vertexShader={`
+            uniform float uTime;
+            uniform float uStrength;
+            varying float vRadius;
+
+            void main() {
+              vec3 p = position;
+              vRadius = length(position.xy);
+              float wave =
+                sin(position.x * 14.0 + uTime * 6.4) +
+                cos(position.y * 12.0 - uTime * 5.1);
+              float funnel = 1.0 - smoothstep(0.0, 0.82, vRadius);
+              p.z += wave * 0.012 * uStrength * (0.35 + vRadius);
+              p.z -= funnel * 0.075 * uStrength;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+            }
+          `}
+          fragmentShader={`
+            uniform vec3 uColor;
+            uniform float uOpacity;
+            varying float vRadius;
+
+            void main() {
+              float rim = smoothstep(0.42, 1.0, vRadius);
+              vec3 highlight = mix(
+                uColor,
+                vec3(1.0, 0.92, 0.76),
+                0.2 + rim * 0.18
+              );
+              gl_FragColor = vec4(highlight, uOpacity);
+            }
+          `}
+          transparent
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      <instancedMesh
+        ref={particles}
+        args={[undefined, undefined, MAX_JUICE_PARTICLES]}
+        count={0}
+        frustumCulled={false}
+        renderOrder={2}
+      >
+        <icosahedronGeometry args={[JUICE_PARTICLE_RADIUS, 1]} />
+        <meshPhysicalMaterial
+          vertexColors
+          transparent
+          opacity={0.88}
+          roughness={0.24}
+          clearcoat={0.35}
+          clearcoatRoughness={0.2}
+          depthWrite={false}
+        />
+      </instancedMesh>
+    </group>
+  );
+}
+
 function DraggableFruit({
   fruit,
   blenderSize,
   blending,
-  blendProgress,
   reducedMotion,
   onDragging,
   onDrop,
@@ -1166,7 +1690,6 @@ function DraggableFruit({
   fruit: FruitItem;
   blenderSize: number;
   blending: boolean;
-  blendProgress: number;
   reducedMotion: boolean;
   onDragging: (dragging: boolean) => void;
   onDrop: (id: number, position: [number, number, number]) => void;
@@ -1187,11 +1710,12 @@ function DraggableFruit({
   }, [blending, fruit.position]);
 
   useEffect(() => {
-    document.body.style.cursor = hovered ? "grab" : "";
+    document.body.style.cursor =
+      hovered && !blending && fruit.juice <= 0.02 ? "grab" : "";
     return () => {
       document.body.style.cursor = "";
     };
-  }, [hovered]);
+  }, [blending, fruit.juice, hovered]);
 
   useEffect(
     () => () => {
@@ -1207,18 +1731,18 @@ function DraggableFruit({
     if (!group.current || dragging.current) return;
 
     if (fruit.inJar && blending) {
-      const speed = reducedMotion ? 1.25 : 3.6 + blendProgress * 7.5;
+      const speed = reducedMotion ? 1.25 : 3.6 + fruit.juice * 7.5;
       const time = state.clock.elapsedTime * speed + fruit.phase;
       const radius = reducedMotion
         ? 0.035
         : Math.max(0.08, 0.5 * blenderSize - 0.31) *
-          (1 - blendProgress * 0.28);
+          (1 - fruit.juice * 0.28);
       const targetX = BLENDER_X + Math.cos(time) * radius;
       const targetZ = Math.sin(time) * radius;
       const rawCirculation =
         (1.7 +
           Math.sin(time * 0.43) * (reducedMotion ? 0.06 : 0.36) +
-          blendProgress * 0.16) *
+          fruit.juice * 0.16) *
         blenderSize;
       const circulation = THREE.MathUtils.clamp(
         rawCirculation,
@@ -1228,10 +1752,10 @@ function DraggableFruit({
 
       group.current.position.set(targetX, circulation, targetZ);
       group.current.rotation.x +=
-        delta * (reducedMotion ? 0.3 : 4 + blendProgress * 8);
+        delta * (reducedMotion ? 0.3 : 4 + fruit.juice * 8);
       group.current.rotation.z +=
-        delta * (reducedMotion ? 0.2 : 3 + blendProgress * 6);
-      const visibleScale = Math.max(0.08, 1 - blendProgress * 0.95);
+        delta * (reducedMotion ? 0.2 : 3 + fruit.juice * 6);
+      const visibleScale = Math.max(0.04, 1 - fruit.juice * 0.98);
       group.current.scale.setScalar(visibleScale);
     } else {
       const bob =
@@ -1243,6 +1767,12 @@ function DraggableFruit({
         fruit.position[1] + bob,
         fruit.position[2],
       );
+      if (fruit.inJar) {
+        const visibleScale = Math.max(0.04, 1 - fruit.juice * 0.98);
+        restingScale.current.setScalar(visibleScale);
+      } else {
+        restingScale.current.set(1, 1, 1);
+      }
       group.current.scale.lerp(restingScale.current, Math.min(1, delta * 8));
     }
   });
@@ -1259,7 +1789,7 @@ function DraggableFruit({
     };
 
   const handlePointerDown = (event: ThreeEvent<PointerEvent>) => {
-    if (blending) return;
+    if (blending || fruit.juice > 0.02) return;
     event.stopPropagation();
     dragging.current = true;
     activePointer.current = event.pointerId;
@@ -1316,7 +1846,7 @@ function DraggableFruit({
       onLostPointerCapture={finishDrag}
       onPointerOver={(event) => {
         event.stopPropagation();
-        setHovered(true);
+        if (!blending && fruit.juice <= 0.02) setHovered(true);
       }}
       onPointerOut={() => setHovered(false)}
     >
@@ -1324,10 +1854,10 @@ function DraggableFruit({
         <sphereGeometry args={[0.42, 12, 12]} />
         <meshBasicMaterial transparent opacity={0} />
       </mesh>
-      <group scale={hovered && !blending ? 1.08 : 1}>
+      <group scale={hovered && !blending && fruit.juice <= 0.02 ? 1.08 : 1}>
         <FruitModel type={fruit.type} />
       </group>
-      {hovered && !blending && (
+      {hovered && !blending && fruit.juice <= 0.02 && (
         <mesh position={[0, -0.34, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.29, 0.36, 32]} />
           <meshBasicMaterial color="#fff4d7" transparent opacity={0.8} side={THREE.DoubleSide} />
