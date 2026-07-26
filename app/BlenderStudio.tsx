@@ -2,6 +2,7 @@
 
 import {
   ContactShadows,
+  Html,
   OrbitControls,
   RoundedBox,
   SoftShadows,
@@ -29,6 +30,7 @@ type FruitItem = {
   type: FruitType;
   position: [number, number, number];
   inJar: boolean;
+  inFridge: boolean;
   phase: number;
   juice: number;
 };
@@ -61,11 +63,18 @@ const FRUIT_COLORS = Object.fromEntries(
 ) as Record<FruitType, string>;
 
 const BLENDER_X = 0.45;
+const FRIDGE_X = -4.15;
+const FRIDGE_Z = -2.2;
 const MAX_FRUIT = 12;
 const MAX_JUICE_PARTICLES = 240;
 const JAR_FLUID_BOTTOM = 1.17;
 const JAR_FLUID_TOP = 3.02;
 const JUICE_PARTICLE_RADIUS = 0.052;
+const BLENDER_SIZES = [
+  { label: "Mini", value: 0.8 },
+  { label: "Everyday", value: 1 },
+  { label: "Big batch", value: 1.28 },
+] as const;
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
@@ -87,6 +96,34 @@ function boardPosition(index: number): [number, number, number] {
   return [-3.45 + column * 0.5, 0.45 + row * 0.015, -0.28 + row * 0.48];
 }
 
+function fridgePosition(index: number): [number, number, number] {
+  const slots: [number, number, number][] = [
+    [-0.43, 3.12, 0.69],
+    [0.3, 3.12, 0.69],
+    [-0.42, 2.23, 0.69],
+    [0.32, 2.23, 0.69],
+    [-0.04, 1.3, 0.69],
+  ];
+  const slot = slots[index % slots.length];
+  return [FRIDGE_X + slot[0], slot[1], FRIDGE_Z + slot[2]];
+}
+
+function freshFridgeFruit(
+  id: number,
+  type: FruitType,
+  index: number,
+): FruitItem {
+  return {
+    id,
+    type,
+    position: fridgePosition(index),
+    inJar: false,
+    inFridge: true,
+    phase: id * 1.71,
+    juice: 0,
+  };
+}
+
 function jarPosition(index: number, size: number): [number, number, number] {
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
   const angle = index * goldenAngle;
@@ -102,7 +139,7 @@ function jarPosition(index: number, size: number): [number, number, number] {
 function reflowBoard(fruits: FruitItem[]) {
   let boardSlot = 0;
   return fruits.map((fruit) =>
-    fruit.inJar
+    fruit.inJar || fruit.inFridge
       ? fruit
       : {
           ...fruit,
@@ -128,26 +165,41 @@ function smoothieColor(fruits: FruitItem[]) {
 }
 
 export default function BlenderStudio() {
-  const [fruits, setFruits] = useState<FruitItem[]>([]);
+  const [fruits, setFruits] = useState<FruitItem[]>(() =>
+    FRUIT.map((fruit, index) =>
+      freshFridgeFruit(index + 1, fruit.type, index),
+    ),
+  );
+  const [fridgeOpen, setFridgeOpen] = useState(false);
   const [blenderSize, setBlenderSize] = useState(1);
   const [blending, setBlending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [muted, setMuted] = useState(false);
   const [liveMessage, setLiveMessage] = useState(
-    "Choose a fruit to begin your blend.",
+    "Open the fridge to choose fresh fruit.",
   );
-  const nextId = useRef(1);
+  const nextId = useRef(FRUIT.length + 1);
   const completionScheduled = useRef(false);
   const reducedMotion = useReducedMotion();
   const insideFruits = fruits.filter((fruit) => fruit.inJar);
   const insideCount = insideFruits.length;
-  const onBoardCount = fruits.length - insideCount;
+  const fridgeCount = fruits.filter((fruit) => fruit.inFridge).length;
+  const onBoardCount = fruits.length - insideCount - fridgeCount;
   const blendProgress = insideCount
     ? insideFruits.reduce((sum, fruit) => sum + fruit.juice, 0) / insideCount
     : 0;
   const blendComplete =
     insideCount > 0 && insideFruits.every((fruit) => fruit.juice >= 0.995);
   const color = useMemo(() => smoothieColor(fruits), [fruits]);
+  const sizeIndex = BLENDER_SIZES.reduce(
+    (closest, option, index) =>
+      Math.abs(option.value - blenderSize) <
+      Math.abs(BLENDER_SIZES[closest].value - blenderSize)
+        ? index
+        : closest,
+    0,
+  );
+  const sizeLabel = BLENDER_SIZES[sizeIndex].label;
 
   useEffect(() => {
     if (!blending) return;
@@ -227,44 +279,86 @@ export default function BlenderStudio() {
     };
   }, [blending, muted]);
 
-  const addFruit = useCallback(
-    (type: FruitType) => {
-      if (fruits.length >= MAX_FRUIT) {
-        setLiveMessage("The kitchen is full. Start over for a fresh batch.");
-        return;
-      }
-      const id = nextId.current++;
-      setFruits((current) => [
-        ...current,
-        {
-          id,
-          type,
-          position: boardPosition(current.filter((fruit) => !fruit.inJar).length),
-          inJar: false,
-          phase: id * 1.71,
-          juice: 0,
-        },
-      ]);
-      setLiveMessage(
-        `${FRUIT.find((fruit) => fruit.type === type)?.label} added. Drag it into the jug.`,
-      );
-    },
-    [fruits.length],
-  );
+  const toggleFridge = useCallback(() => {
+    if (dragging) {
+      setLiveMessage("Finish placing the fruit before closing the fridge.");
+      return;
+    }
+
+    if (!fridgeOpen) {
+      setFridgeOpen(true);
+      setLiveMessage("Fridge open. Grab a fruit and drag it into the jug.");
+      return;
+    }
+
+    const kept = fruits.filter((fruit) => !fruit.inFridge);
+    const fresh = FRUIT.map((fruit, index) =>
+      freshFridgeFruit(nextId.current++, fruit.type, index),
+    );
+    setFruits([...kept, ...fresh]);
+    setFridgeOpen(false);
+    setLiveMessage(
+      "Fridge closed. Five fresh fruits generated inside.",
+    );
+  }, [dragging, fridgeOpen, fruits]);
 
   const dropFruit = useCallback(
-    (id: number, position: [number, number, number]) => {
+    (
+      id: number,
+      position: [number, number, number],
+      droppedOverJar: boolean,
+    ) => {
+      const draggedFruit = fruits.find((fruit) => fruit.id === id);
+      const activeFruitCount = fruits.filter(
+        (fruit) => fruit.id !== id && !fruit.inFridge,
+      ).length;
+      const capacityReached =
+        Boolean(draggedFruit?.inFridge) && activeFruitCount >= MAX_FRUIT;
+
+      if (capacityReached) {
+        setFruits((current) =>
+          current.map((fruit) =>
+            fruit.id === id
+              ? {
+                  ...fruit,
+                  position: [...fruit.position] as [number, number, number],
+                }
+              : fruit,
+          ),
+        );
+        setLiveMessage(
+          "This batch is full. Mix or clear it before taking more fruit.",
+        );
+        return;
+      }
+
       const radius = 0.7 * blenderSize;
       const radialDistance = Math.hypot(
         position[0] - BLENDER_X,
         position[2],
       );
       const withinOpening =
-        radialDistance < radius &&
-        position[1] > 2.35 * blenderSize &&
-        position[1] < 4.05 * blenderSize;
+        droppedOverJar ||
+        (radialDistance < radius &&
+          position[1] > 2.35 * blenderSize &&
+          position[1] < 4.05 * blenderSize);
 
       setFruits((current) => {
+        const movingFruit = current.find((fruit) => fruit.id === id);
+        const currentActiveCount = current.filter(
+          (fruit) => fruit.id !== id && !fruit.inFridge,
+        ).length;
+        if (movingFruit?.inFridge && currentActiveCount >= MAX_FRUIT) {
+          return current.map((fruit) =>
+            fruit.id === id
+              ? {
+                  ...fruit,
+                  position: [...fruit.position] as [number, number, number],
+                }
+              : fruit,
+          );
+        }
+
         const insideSlot = current.filter(
           (fruit) => fruit.inJar && fruit.id !== id,
         ).length;
@@ -274,12 +368,14 @@ export default function BlenderStudio() {
             return {
               ...fruit,
               inJar: true,
+              inFridge: false,
               position: jarPosition(insideSlot, blenderSize),
             };
           }
           return {
             ...fruit,
             inJar: false,
+            inFridge: false,
             position,
           };
         });
@@ -292,13 +388,16 @@ export default function BlenderStudio() {
         setLiveMessage("Fruit returned to the cutting board.");
       }
     },
-    [blenderSize],
+    [blenderSize, fruits],
   );
 
   const moveBoardFruitToJug = useCallback(() => {
     if (blending) return;
     setFruits((current) => {
-      const target = current.find((fruit) => !fruit.inJar);
+      const target = current.find(
+        (fruit) =>
+          !fruit.inJar && (!fruit.inFridge || fridgeOpen),
+      );
       if (!target) return current;
       const insideSlot = current.filter((fruit) => fruit.inJar).length;
       const next = current.map((fruit) =>
@@ -306,6 +405,7 @@ export default function BlenderStudio() {
           ? {
               ...fruit,
               inJar: true,
+              inFridge: false,
               position: jarPosition(insideSlot, blenderSize),
             }
           : fruit,
@@ -313,7 +413,7 @@ export default function BlenderStudio() {
       return reflowBoard(next);
     });
     setLiveMessage("One fruit moved into the jug. Ready to whirl.");
-  }, [blenderSize, blending]);
+  }, [blenderSize, blending, fridgeOpen]);
 
   const resizeBlender = useCallback(
     (nextSize: number) => {
@@ -339,9 +439,25 @@ export default function BlenderStudio() {
     [blenderSize],
   );
 
+  const stepBlenderSize = useCallback(
+    (direction: -1 | 1) => {
+      const nextIndex = THREE.MathUtils.clamp(
+        sizeIndex + direction,
+        0,
+        BLENDER_SIZES.length - 1,
+      );
+      resizeBlender(BLENDER_SIZES[nextIndex].value);
+    },
+    [resizeBlender, sizeIndex],
+  );
+
   const toggleBlend = () => {
     if (!insideCount) {
-      setLiveMessage("Drop at least one fruit into the jug first.");
+      setLiveMessage("Open the fridge and drop at least one fruit into the jug.");
+      return;
+    }
+    if (blendComplete) {
+      setLiveMessage("This batch is already silky smooth. Add fresh fruit or clear it.");
       return;
     }
     setBlending((running) => {
@@ -353,8 +469,12 @@ export default function BlenderStudio() {
 
   const reset = () => {
     setBlending(false);
-    setFruits([]);
-    setLiveMessage("Jug cleared. Choose a fruit for a fresh blend.");
+    const fresh = FRUIT.map((fruit, index) =>
+      freshFridgeFruit(nextId.current++, fruit.type, index),
+    );
+    setFruits(fresh);
+    setFridgeOpen(false);
+    setLiveMessage("Batch cleared. Five fresh fruits generated in the fridge.");
   };
 
   const phaseLabel =
@@ -381,7 +501,7 @@ export default function BlenderStudio() {
         <Canvas
           shadows
           dpr={[1, 1.6]}
-          camera={{ position: [6.2, 4.5, 8.1], fov: 38, near: 0.1, far: 80 }}
+          camera={{ position: [7.4, 4.8, 10.2], fov: 38, near: 0.1, far: 80 }}
           gl={{ antialias: true, powerPreference: "high-performance" }}
           fallback={
             <div className="webgl-fallback">
@@ -393,41 +513,49 @@ export default function BlenderStudio() {
             <BlendroomScene
               fruits={fruits}
               blenderSize={blenderSize}
+              sizeIndex={sizeIndex}
+              sizeLabel={sizeLabel}
               blending={blending}
               blendProgress={blendProgress}
+              blendComplete={blendComplete}
               smoothieColor={color}
+              fridgeOpen={fridgeOpen}
+              fridgeCount={fridgeCount}
               dragging={dragging}
               reducedMotion={reducedMotion}
               onDragging={setDragging}
               onFruitDrop={dropFruit}
+              onFridgeToggle={toggleFridge}
+              onQuickAdd={moveBoardFruitToJug}
+              onBlend={toggleBlend}
+              onSizeStep={stepBlenderSize}
             />
           </Suspense>
         </Canvas>
       </div>
 
-      <section className="brand-card" aria-labelledby="studio-title">
+      <header className="brand-lockup" aria-labelledby="studio-title">
         <div className="eyebrow">
           <span className="brand-mark" aria-hidden="true">
             B
           </span>
-          BLENDROOM
+          BLENDROOM · KITCHEN LAB
         </div>
-        <h1 id="studio-title">Make a little sunshine.</h1>
-        <p>Pick fruit, drag it into the jug, then let the kitchen whirl.</p>
-        <div className="drag-hint">
-          <span aria-hidden="true">↗</span>
-          Drag fruit from the walnut board into the glass jug
-        </div>
-      </section>
+        <h1 id="studio-title">Blend what&apos;s fresh.</h1>
+        <p>Open the fridge, grab fruit, then press the red button.</p>
+      </header>
 
-      <aside className={`scene-status ${blending ? "is-live" : ""}`}>
+      <aside className={`utility-pill ${blending ? "is-live" : ""}`}>
         <span className="status-dot" aria-hidden="true" />
-        <div>
-          <span>{blending ? "Motor running" : "Blender studio"}</span>
-          <strong>{phaseLabel}</strong>
+        <div className="status-copy">
+          <span>{blending ? "Motor running" : "Kitchen status"}</span>
+          <strong>
+            {phaseLabel}
+            <em>{Math.round(blendProgress * 100)}%</em>
+          </strong>
         </div>
         <button
-          className="sound-button"
+          className="utility-button"
           type="button"
           onClick={() => setMuted((value) => !value)}
           aria-label={muted ? "Turn motor sound on" : "Mute motor sound"}
@@ -435,134 +563,17 @@ export default function BlenderStudio() {
         >
           {muted ? "⊘" : "♪"}
         </button>
+        <button
+          className="utility-button clear-button"
+          type="button"
+          onClick={reset}
+          disabled={!insideCount && !onBoardCount}
+          aria-label="Clear the current batch and restock the fridge"
+          title="Fresh batch"
+        >
+          ↺
+        </button>
       </aside>
-
-      <section className="control-deck" aria-label="Blender controls">
-        <div className="control-group fruit-control">
-          <div className="control-heading">
-            <span>1 · Pick fruit</span>
-            <span className="count-pill">
-              {onBoardCount} on board · {insideCount} in jug
-            </span>
-          </div>
-          <div className="fruit-list">
-            {FRUIT.map((fruit) => (
-              <button
-                key={fruit.type}
-                type="button"
-                className="fruit-button"
-                onClick={() => addFruit(fruit.type)}
-                disabled={fruits.length >= MAX_FRUIT}
-                style={{ "--fruit-color": fruit.color } as React.CSSProperties}
-                aria-label={`Add ${fruit.label}`}
-              >
-                <span className="fruit-orb" aria-hidden="true">
-                  {fruit.icon}
-                </span>
-                <span>{fruit.label}</span>
-                <span className="fruit-plus" aria-hidden="true">
-                  +
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="fruit-assist-row">
-            <span>Drag to the jug</span>
-            <button
-              type="button"
-              onClick={moveBoardFruitToJug}
-              disabled={!onBoardCount || blending}
-              aria-label="Move one fruit from the board into the jug"
-            >
-              Put one in jug <span aria-hidden="true">↗</span>
-            </button>
-          </div>
-        </div>
-
-        <div className="control-group size-control">
-          <div className="control-heading">
-            <span>2 · Blender size</span>
-            <output htmlFor="blender-size">{blenderSize.toFixed(2)}×</output>
-          </div>
-          <input
-            id="blender-size"
-            type="range"
-            min="0.78"
-            max="1.3"
-            step="0.01"
-            value={blenderSize}
-            onChange={(event) => resizeBlender(Number(event.target.value))}
-            aria-label="Blender size"
-            aria-valuetext={`${blenderSize.toFixed(2)} times normal size`}
-          />
-          <div className="size-presets" aria-label="Blender size presets">
-            <button
-              type="button"
-              onClick={() => resizeBlender(0.8)}
-              aria-pressed={blenderSize < 0.9}
-              className={blenderSize < 0.9 ? "is-active" : ""}
-            >
-              Mini
-            </button>
-            <button
-              type="button"
-              onClick={() => resizeBlender(1)}
-              aria-pressed={blenderSize >= 0.9 && blenderSize < 1.15}
-              className={
-                blenderSize >= 0.9 && blenderSize < 1.15 ? "is-active" : ""
-              }
-            >
-              Everyday
-            </button>
-            <button
-              type="button"
-              onClick={() => resizeBlender(1.28)}
-              aria-pressed={blenderSize >= 1.15}
-              className={blenderSize >= 1.15 ? "is-active" : ""}
-            >
-              Big batch
-            </button>
-          </div>
-        </div>
-
-        <div className="control-group action-control">
-          <div className="blend-readout">
-            <span>{phaseLabel}</span>
-            <span>{Math.round(blendProgress * 100)}%</span>
-          </div>
-          <div className="progress-track" aria-hidden="true">
-            <span style={{ width: `${blendProgress * 100}%`, background: color }} />
-          </div>
-          <div className="action-row">
-            <button
-              type="button"
-              className={`blend-button ${blending ? "is-running" : ""}`}
-              onClick={toggleBlend}
-              disabled={!insideCount || blendComplete}
-            >
-              <span className="power-glyph" aria-hidden="true">
-                {blending ? "■" : "▶"}
-              </span>
-              {blending
-                ? "Stop"
-                : blendComplete
-                  ? "Smooth!"
-                  : blendProgress > 0
-                    ? "Keep blending"
-                    : "Blend now"}
-            </button>
-            <button
-              type="button"
-              className="reset-button"
-              onClick={reset}
-              disabled={!fruits.length}
-              aria-label="Start over and clear all fruit"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
-      </section>
 
       <p className="sr-only" role="status" aria-live="polite">
         {liveMessage}
@@ -574,27 +585,54 @@ export default function BlenderStudio() {
 type SceneProps = {
   fruits: FruitItem[];
   blenderSize: number;
+  sizeIndex: number;
+  sizeLabel: string;
   blending: boolean;
   blendProgress: number;
+  blendComplete: boolean;
   smoothieColor: string;
+  fridgeOpen: boolean;
+  fridgeCount: number;
   dragging: boolean;
   reducedMotion: boolean;
   onDragging: (dragging: boolean) => void;
-  onFruitDrop: (id: number, position: [number, number, number]) => void;
+  onFruitDrop: (
+    id: number,
+    position: [number, number, number],
+    droppedOverJar: boolean,
+  ) => void;
+  onFridgeToggle: () => void;
+  onQuickAdd: () => void;
+  onBlend: () => void;
+  onSizeStep: (direction: -1 | 1) => void;
 };
 
 function BlendroomScene({
   fruits,
   blenderSize,
+  sizeIndex,
+  sizeLabel,
   blending,
   blendProgress,
+  blendComplete,
   smoothieColor: color,
+  fridgeOpen,
+  fridgeCount,
   dragging,
   reducedMotion,
   onDragging,
   onFruitDrop,
+  onFridgeToggle,
+  onQuickAdd,
+  onBlend,
+  onSizeStep,
 }: SceneProps) {
   const compact = useThree((state) => state.size.width < 880);
+  const activeFruitCount = fruits.filter((fruit) => !fruit.inFridge).length;
+  const canTakeFromFridge = activeFruitCount < MAX_FRUIT;
+  const canQuickAdd =
+    fruits.some((fruit) => !fruit.inJar && !fruit.inFridge) ||
+    (fridgeOpen && fridgeCount > 0 && canTakeFromFridge);
   const juiceSources = useMemo(
     () =>
       fruits
@@ -636,14 +674,29 @@ function BlendroomScene({
       <pointLight position={[4.3, 4.6, -1.3]} intensity={34} color="#b8e5e0" />
 
       <Kitchen />
+      <Fridge
+        open={fridgeOpen}
+        stockCount={fridgeCount}
+        blending={blending}
+        canTakeFruit={canTakeFromFridge}
+        canQuickAdd={canQuickAdd}
+        reducedMotion={reducedMotion}
+        onToggle={onFridgeToggle}
+        onQuickAdd={onQuickAdd}
+      />
       <BlenderRig
         size={blenderSize}
+        sizeIndex={sizeIndex}
+        sizeLabel={sizeLabel}
         blending={blending}
         blendProgress={blendProgress}
+        blendComplete={blendComplete}
         smoothieColor={color}
         fruitCount={fruits.filter((fruit) => fruit.inJar).length}
         juiceSources={juiceSources}
         reducedMotion={reducedMotion}
+        onBlend={onBlend}
+        onSizeStep={onSizeStep}
       />
 
       {fruits.map((fruit) => (
@@ -652,6 +705,8 @@ function BlendroomScene({
           fruit={fruit}
           blenderSize={blenderSize}
           blending={blending}
+          fridgeOpen={fridgeOpen}
+          disabled={dragging || (fruit.inFridge && !canTakeFromFridge)}
           reducedMotion={reducedMotion}
           onDragging={onDragging}
           onDrop={onFruitDrop}
@@ -670,13 +725,13 @@ function BlendroomScene({
         makeDefault
         enabled={!dragging}
         enablePan={false}
-        minDistance={compact ? 8.8 : 6.8}
-        maxDistance={compact ? 16 : 12}
+        minDistance={compact ? 11.5 : 6.8}
+        maxDistance={compact ? 23 : 14.5}
         minPolarAngle={Math.PI * 0.22}
         maxPolarAngle={Math.PI * 0.48}
         minAzimuthAngle={-0.55}
         maxAzimuthAngle={0.72}
-        target={compact ? [-1.05, 1.42, 0] : [0.1, 1.42, 0]}
+        target={compact ? [-1.55, 1.5, 0] : [-0.7, 1.55, 0]}
         dampingFactor={0.07}
       />
       <ResponsiveCamera reducedMotion={reducedMotion} />
@@ -686,19 +741,22 @@ function BlendroomScene({
 
 function ResponsiveCamera({ reducedMotion }: { reducedMotion: boolean }) {
   const { camera, size } = useThree();
-  const mobileLayout = useRef<boolean | null>(null);
 
   useEffect(() => {
     const isMobile = size.width < 880;
-    if (mobileLayout.current === isMobile && !reducedMotion) return;
     if (isMobile) {
-      camera.position.set(8.4, 5.6, 12.3);
+      camera.position.set(6.4, 5.6, 16.2);
     } else {
-      camera.position.set(6.2, 4.5, 8.1);
+      camera.position.set(7.4, 4.8, 10.2);
     }
-    camera.lookAt(isMobile ? -1.05 : 0.1, 1.42, 0);
-    mobileLayout.current = isMobile;
-  }, [camera, reducedMotion, size.width]);
+    if (camera instanceof THREE.PerspectiveCamera) {
+      const targetFov = THREE.MathUtils.degToRad(isMobile ? 50 : 38);
+      const focalLength =
+        (0.5 * camera.getFilmHeight()) / Math.tan(targetFov * 0.5);
+      camera.setFocalLength(focalLength);
+    }
+    camera.lookAt(isMobile ? -1.55 : -0.7, isMobile ? 1.5 : 1.55, 0);
+  }, [camera, reducedMotion, size.height, size.width]);
 
   return null;
 }
@@ -776,7 +834,6 @@ function Kitchen() {
         </group>
       ))}
 
-      <UpperCabinet position={[-4.2, 3.42, -2.68]} />
       <UpperCabinet position={[4.2, 3.42, -2.68]} />
       <WindowScene />
 
@@ -793,6 +850,194 @@ function Kitchen() {
       <Sink />
       <Pendant position={[-2.6, 5.1, 0.1]} />
       <Pendant position={[3.1, 5.1, 0.1]} />
+    </group>
+  );
+}
+
+function Fridge({
+  open,
+  stockCount,
+  blending,
+  canTakeFruit,
+  canQuickAdd,
+  reducedMotion,
+  onToggle,
+  onQuickAdd,
+}: {
+  open: boolean;
+  stockCount: number;
+  blending: boolean;
+  canTakeFruit: boolean;
+  canQuickAdd: boolean;
+  reducedMotion: boolean;
+  onToggle: () => void;
+  onQuickAdd: () => void;
+}) {
+  const doorPivot = useRef<THREE.Group>(null);
+  const [hovered, setHovered] = useState(false);
+
+  useFrame((_, delta) => {
+    if (!doorPivot.current) return;
+    const target = open ? -1.42 : 0;
+    doorPivot.current.rotation.y = reducedMotion
+      ? target
+      : THREE.MathUtils.damp(
+          doorPivot.current.rotation.y,
+          target,
+          7.5,
+          Math.min(delta, 0.05),
+        );
+  });
+
+  useEffect(() => {
+    if (!hovered) return;
+    document.body.style.cursor = "pointer";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [hovered]);
+
+  return (
+    <group position={[FRIDGE_X, 0, FRIDGE_Z]}>
+      <mesh castShadow receiveShadow position={[0, 2.16, -0.63]}>
+        <boxGeometry args={[1.86, 4.32, 0.14]} />
+        <meshStandardMaterial color="#cbd0c2" roughness={0.52} />
+      </mesh>
+      {[-0.9, 0.9].map((x) => (
+        <mesh key={x} castShadow position={[x, 2.16, 0]}>
+          <boxGeometry args={[0.14, 4.32, 1.38]} />
+          <meshStandardMaterial color="#dce0d4" roughness={0.48} />
+        </mesh>
+      ))}
+      {[0.08, 4.24].map((y) => (
+        <mesh key={y} castShadow position={[0, y, 0]}>
+          <boxGeometry args={[1.88, 0.16, 1.38]} />
+          <meshStandardMaterial color="#dce0d4" roughness={0.5} />
+        </mesh>
+      ))}
+
+      <mesh position={[0, 2.15, -0.54]}>
+        <boxGeometry args={[1.62, 3.98, 0.04]} />
+        <meshStandardMaterial color="#748177" roughness={0.74} />
+      </mesh>
+      {[1.72, 2.62, 3.52].map((y) => (
+        <group key={y}>
+          <mesh position={[0, y, 0.18]}>
+            <boxGeometry args={[1.62, 0.055, 1.06]} />
+            <meshPhysicalMaterial
+              color="#d7e8e3"
+              transparent
+              opacity={0.58}
+              roughness={0.18}
+              transmission={0.12}
+            />
+          </mesh>
+          <mesh position={[0, y + 0.025, 0.7]}>
+            <boxGeometry args={[1.65, 0.055, 0.05]} />
+            <meshStandardMaterial color="#b6c5bd" metalness={0.25} roughness={0.34} />
+          </mesh>
+        </group>
+      ))}
+      <pointLight
+        position={[0, 3.55, 0.48]}
+        intensity={open ? 8 : 0}
+        distance={3.2}
+        color="#fff1bd"
+      />
+
+      <group ref={doorPivot} position={[-0.94, 2.16, 0.73]}>
+        <RoundedBox
+          args={[1.9, 4.34, 0.16]}
+          radius={0.12}
+          smoothness={4}
+          position={[0.95, 0, 0]}
+          castShadow
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle();
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerOver={(event) => {
+            event.stopPropagation();
+            setHovered(true);
+          }}
+          onPointerOut={() => setHovered(false)}
+        >
+          <meshStandardMaterial
+            color={hovered ? "#eef0e7" : "#e3e5dc"}
+            roughness={0.36}
+            metalness={0.08}
+          />
+        </RoundedBox>
+        <RoundedBox
+          args={[0.11, 1.18, 0.13]}
+          radius={0.04}
+          smoothness={3}
+          position={[1.58, 0.22, 0.14]}
+          castShadow
+        >
+          <meshStandardMaterial color="#a77c50" metalness={0.72} roughness={0.22} />
+        </RoundedBox>
+        <mesh position={[0.95, -0.42, 0.13]}>
+          <boxGeometry args={[1.46, 0.025, 0.025]} />
+          <meshStandardMaterial color="#c4c9bd" roughness={0.42} />
+        </mesh>
+        {[0.62, 0.78, 0.94, 1.1, 1.26].map((x) => (
+          <mesh key={x} position={[x, 1.7, 0.13]}>
+            <boxGeometry args={[0.07, 0.018, 0.028]} />
+            <meshStandardMaterial color="#9da69c" roughness={0.48} />
+          </mesh>
+        ))}
+      </group>
+
+      <Html
+        center
+        position={[0, -0.38, 0.78]}
+        zIndexRange={[60, 0]}
+        wrapperClass="fridge-anchor"
+      >
+        <div
+          className={`fridge-callout ${open ? "is-open" : ""}`}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="fridge-toggle"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+            aria-expanded={open}
+          >
+            <span className="fridge-glyph" aria-hidden="true">
+              {open ? "↙" : "▥"}
+            </span>
+            <span>
+              <small>
+                {open
+                  ? canTakeFruit
+                    ? `${stockCount} on the shelves`
+                    : "Current batch is full"
+                  : `${stockCount} fresh inside`}
+              </small>
+              <strong>{open ? "Close · restock" : "Open fridge"}</strong>
+            </span>
+          </button>
+          {open && (
+            <button
+              type="button"
+              className="quick-add"
+              onClick={(event) => {
+                event.stopPropagation();
+                onQuickAdd();
+              }}
+              disabled={blending || !canQuickAdd}
+            >
+              Place one <span aria-hidden="true">↗</span>
+            </button>
+          )}
+        </div>
+      </Html>
     </group>
   );
 }
@@ -977,22 +1222,129 @@ function HerbPot({ position }: { position: [number, number, number] }) {
   );
 }
 
+function BlenderPowerButton({
+  blending,
+  ready,
+  complete,
+  onPress,
+}: {
+  blending: boolean;
+  ready: boolean;
+  complete: boolean;
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  useEffect(() => {
+    if (!hovered) return;
+    document.body.style.cursor = "pointer";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [hovered]);
+
+  const buttonColor = blending
+    ? "#435947"
+    : complete
+      ? "#c99960"
+      : ready
+        ? "#e05545"
+        : "#b7a99b";
+
+  return (
+    <group>
+      <mesh
+        position={[0, 0.48, 0.728]}
+        rotation={[Math.PI / 2, 0, 0]}
+        castShadow
+        onClick={(event) => {
+          event.stopPropagation();
+          onPress();
+        }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerOver={(event) => {
+          event.stopPropagation();
+          setHovered(true);
+        }}
+        onPointerOut={() => setHovered(false)}
+        scale={hovered ? 1.06 : 1}
+      >
+        <cylinderGeometry args={[0.27, 0.27, 0.08, 40]} />
+        <meshStandardMaterial
+          color={buttonColor}
+          roughness={0.34}
+          emissive={buttonColor}
+          emissiveIntensity={blending ? 0.42 : ready ? 0.16 : 0.04}
+        />
+      </mesh>
+      <mesh position={[0, 0.48, 0.774]}>
+        <torusGeometry args={[0.145, 0.022, 12, 32]} />
+        <meshStandardMaterial
+          color={blending ? "#d8f0d7" : "#ffe0d4"}
+          emissive={blending ? "#7bc37e" : "#a53125"}
+          emissiveIntensity={blending ? 0.72 : 0.18}
+        />
+      </mesh>
+      <Html
+        center
+        position={[0, 0.48, 0.81]}
+        zIndexRange={[70, 0]}
+        wrapperClass="power-anchor"
+      >
+        <button
+          type="button"
+          className={`appliance-power-hit ${blending ? "is-running" : ""} ${
+            ready && !blending ? "is-ready" : ""
+          }`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onPress();
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          aria-label={
+            blending
+              ? "Stop blender"
+              : complete
+                ? "Smoothie is complete"
+                : ready
+                  ? "Start blending"
+                  : "Add fruit before blending"
+          }
+          aria-pressed={blending}
+        >
+          <span aria-hidden="true">{blending ? "■" : "▶"}</span>
+        </button>
+      </Html>
+    </group>
+  );
+}
+
 function BlenderRig({
   size,
+  sizeIndex,
+  sizeLabel,
   blending,
   blendProgress,
+  blendComplete,
   smoothieColor: color,
   fruitCount,
   juiceSources,
   reducedMotion,
+  onBlend,
+  onSizeStep,
 }: {
   size: number;
+  sizeIndex: number;
+  sizeLabel: string;
   blending: boolean;
   blendProgress: number;
+  blendComplete: boolean;
   smoothieColor: string;
   fruitCount: number;
   juiceSources: JuiceSource[];
   reducedMotion: boolean;
+  onBlend: () => void;
+  onSizeStep: (direction: -1 | 1) => void;
 }) {
   const group = useRef<THREE.Group>(null);
   const blade = useRef<THREE.Group>(null);
@@ -1069,14 +1421,12 @@ function BlenderRig({
             roughness={0.25}
           />
         </mesh>
-        <mesh position={[0, 0.48, 0.711]} rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry args={[0.25, 0.25, 0.06, 40]} />
-          <meshStandardMaterial color="#df5e4d" roughness={0.38} />
-        </mesh>
-        <mesh position={[0, 0.48, 0.748]}>
-          <torusGeometry args={[0.14, 0.022, 12, 32]} />
-          <meshStandardMaterial color="#f8d2c7" emissive="#9f2419" emissiveIntensity={0.14} />
-        </mesh>
+        <BlenderPowerButton
+          blending={blending}
+          ready={fruitCount > 0 && !blendComplete}
+          complete={blendComplete}
+          onPress={onBlend}
+        />
         <mesh position={[-0.45, 0.1, 0.55]}>
           <boxGeometry args={[0.28, 0.06, 0.25]} />
           <meshStandardMaterial color="#4e4237" roughness={0.72} />
@@ -1086,6 +1436,47 @@ function BlenderRig({
           <meshStandardMaterial color="#4e4237" roughness={0.72} />
         </mesh>
       </group>
+
+      <Html
+        center
+        position={[0, -0.24, 0.28]}
+        zIndexRange={[65, 0]}
+        wrapperClass="blender-stepper-anchor"
+      >
+        <div
+          className="size-stepper"
+          aria-label="Blender size"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSizeStep(-1);
+            }}
+            disabled={sizeIndex === 0}
+            aria-label="Decrease blender size"
+          >
+            ←
+          </button>
+          <div>
+            <small>Blender size</small>
+            <strong>{sizeLabel}</strong>
+            <output>{size.toFixed(2)}×</output>
+          </div>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSizeStep(1);
+            }}
+            disabled={sizeIndex === BLENDER_SIZES.length - 1}
+            aria-label="Increase blender size"
+          >
+            →
+          </button>
+        </div>
+      </Html>
 
       <group position={[0, 1.02, 0]}>
         <mesh renderOrder={3} castShadow>
@@ -1683,6 +2074,8 @@ function DraggableFruit({
   fruit,
   blenderSize,
   blending,
+  fridgeOpen,
+  disabled,
   reducedMotion,
   onDragging,
   onDrop,
@@ -1690,9 +2083,15 @@ function DraggableFruit({
   fruit: FruitItem;
   blenderSize: number;
   blending: boolean;
+  fridgeOpen: boolean;
+  disabled: boolean;
   reducedMotion: boolean;
   onDragging: (dragging: boolean) => void;
-  onDrop: (id: number, position: [number, number, number]) => void;
+  onDrop: (
+    id: number,
+    position: [number, number, number],
+    droppedOverJar: boolean,
+  ) => void;
 }) {
   const group = useRef<THREE.Group>(null);
   const { camera } = useThree();
@@ -1711,11 +2110,11 @@ function DraggableFruit({
 
   useEffect(() => {
     document.body.style.cursor =
-      hovered && !blending && fruit.juice <= 0.02 ? "grab" : "";
+      hovered && !blending && !disabled && fruit.juice <= 0.02 ? "grab" : "";
     return () => {
       document.body.style.cursor = "";
     };
-  }, [blending, fruit.juice, hovered]);
+  }, [blending, disabled, fruit.juice, hovered]);
 
   useEffect(
     () => () => {
@@ -1789,16 +2188,31 @@ function DraggableFruit({
     };
 
   const handlePointerDown = (event: ThreeEvent<PointerEvent>) => {
-    if (blending || fruit.juice > 0.02) return;
+    if (dragging.current || blending || disabled || fruit.juice > 0.02) return;
     event.stopPropagation();
     dragging.current = true;
     activePointer.current = event.pointerId;
     onDragging(true);
     pointerTarget(event).setPointerCapture(event.pointerId);
-    const normal = new THREE.Vector3();
-    camera.getWorldDirection(normal);
     const position = group.current?.position ?? new THREE.Vector3(...fruit.position);
-    dragPlane.current.setFromNormalAndCoplanarPoint(normal, position);
+    const mouth = new THREE.Vector3(BLENDER_X, 3.05 * blenderSize, 0);
+    const horizontalTravel = Math.hypot(
+      position.x - mouth.x,
+      position.z - mouth.z,
+    );
+
+    if (!fruit.inJar && horizontalTravel > 0.15) {
+      dragPlane.current.setFromCoplanarPoints(
+        position,
+        mouth,
+        mouth.clone().add(new THREE.Vector3(0, 1, 0)),
+      );
+    } else {
+      const normal = new THREE.Vector3();
+      camera.getWorldDirection(normal);
+      dragPlane.current.setFromNormalAndCoplanarPoint(normal, position);
+    }
+
     const hit = new THREE.Vector3();
     if (event.ray.intersectPlane(dragPlane.current, hit)) {
       grabOffset.current.copy(position).sub(hit);
@@ -1812,9 +2226,9 @@ function DraggableFruit({
     const hit = new THREE.Vector3();
     if (!event.ray.intersectPlane(dragPlane.current, hit)) return;
     hit.add(grabOffset.current);
-    hit.x = THREE.MathUtils.clamp(hit.x, -4.25, 4.25);
+    hit.x = THREE.MathUtils.clamp(hit.x, -5.4, 4.25);
     hit.y = THREE.MathUtils.clamp(hit.y, 0.22, 4.35);
-    hit.z = THREE.MathUtils.clamp(hit.z, -1.35, 1.4);
+    hit.z = THREE.MathUtils.clamp(hit.z, -1.7, 1.4);
     latestPosition.current.copy(hit);
     group.current?.position.copy(hit);
   };
@@ -1832,8 +2246,19 @@ function DraggableFruit({
     onDragging(false);
     document.body.style.cursor = hovered ? "grab" : "";
     const position = latestPosition.current;
-    onDrop(fruit.id, [position.x, position.y, position.z]);
+    const droppedOverJar =
+      Math.hypot(position.x - BLENDER_X, position.z) <
+        0.72 * blenderSize &&
+      position.y > 2.35 * blenderSize &&
+      position.y < 4.05 * blenderSize;
+    onDrop(
+      fruit.id,
+      [position.x, position.y, position.z],
+      droppedOverJar,
+    );
   };
+
+  if (fruit.inFridge && !fridgeOpen) return null;
 
   return (
     <group
@@ -1846,7 +2271,7 @@ function DraggableFruit({
       onLostPointerCapture={finishDrag}
       onPointerOver={(event) => {
         event.stopPropagation();
-        if (!blending && fruit.juice <= 0.02) setHovered(true);
+        if (!blending && !disabled && fruit.juice <= 0.02) setHovered(true);
       }}
       onPointerOut={() => setHovered(false)}
     >
@@ -1854,10 +2279,14 @@ function DraggableFruit({
         <sphereGeometry args={[0.42, 12, 12]} />
         <meshBasicMaterial transparent opacity={0} />
       </mesh>
-      <group scale={hovered && !blending && fruit.juice <= 0.02 ? 1.08 : 1}>
+      <group
+        scale={
+          hovered && !blending && !disabled && fruit.juice <= 0.02 ? 1.08 : 1
+        }
+      >
         <FruitModel type={fruit.type} />
       </group>
-      {hovered && !blending && fruit.juice <= 0.02 && (
+      {hovered && !blending && !disabled && fruit.juice <= 0.02 && (
         <mesh position={[0, -0.34, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.29, 0.36, 32]} />
           <meshBasicMaterial color="#fff4d7" transparent opacity={0.8} side={THREE.DoubleSide} />

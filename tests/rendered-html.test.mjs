@@ -30,11 +30,16 @@ test("server-renders the Blendroom experience and social metadata", async () => 
 
   const html = await response.text();
   assert.match(html, /<title>Blendroom — 3D Fruit Blender<\/title>/i);
-  assert.match(html, /<h1[^>]*>Make a little sunshine\.<\/h1>/i);
-  assert.match(html, /aria-label="Add Strawberry"/);
-  assert.match(html, /aria-label="Add Banana"/);
-  assert.match(html, /aria-label="Blender size"/);
-  assert.match(html, /Blend now/);
+  assert.match(
+    html,
+    /<h1[^>]*>Blend what(?:'|&#x27;)s fresh\.<\/h1>/i,
+  );
+  assert.match(html, /Open the fridge, grab fruit/);
+  assert.match(html, /aria-label="Mute motor sound"/);
+  assert.match(
+    html,
+    /aria-label="Clear the current batch and restock the fridge"/,
+  );
   assert.match(
     html,
     /https:\/\/blendroom-3d-kitchen\.damiancc79\.chatgpt\.site\/og\.png/,
@@ -53,6 +58,16 @@ test("keeps the contained fluid simulation and preview asset in source", async (
 
   assert.match(studio, /juice:\s*number/);
   assert.match(studio, /function JuiceFluid\(/);
+  assert.match(studio, /function Fridge\(/);
+  assert.match(studio, /function freshFridgeFruit\(/);
+  assert.match(studio, /Fridge closed\. Five fresh fruits generated inside\./);
+  assert.match(studio, /droppedOverJar/);
+  assert.match(studio, /currentActiveCount\s*>?=\s*MAX_FRUIT/);
+  assert.match(studio, /setFromCoplanarPoints/);
+  assert.match(studio, /function BlenderPowerButton\(/);
+  assert.match(studio, /className="size-stepper"/);
+  assert.match(studio, /aria-label="Decrease blender size"/);
+  assert.match(studio, /aria-label="Increase blender size"/);
   assert.match(studio, /MAX_JUICE_PARTICLES\s*=\s*240/);
   assert.match(studio, /function jarInteriorRadius\(/);
   assert.match(studio, /emittedByFruit:\s*Map<number,\s*number>/);

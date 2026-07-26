@@ -18,18 +18,18 @@ export const metadata: Metadata = {
   ),
   title: "Blendroom — 3D Fruit Blender",
   description:
-    "Add fruit, drag it into the jug, resize your blender, and watch it become swirling juice in a sunlit 3D kitchen.",
+    "Open the fridge, grab fresh fruit, resize the blender with its arrow controls, and press the red button to mix a contained juice vortex.",
   openGraph: {
     title: "Blendroom — 3D Fruit Blender",
     description:
-      "Drag in fruit and blend it into a colorful contained juice vortex.",
+      "Open the fridge, grab fruit, and press the blender’s red button.",
     type: "website",
     images: [
       {
         url: "/og.png",
         width: 1200,
         height: 630,
-        alt: "Blendroom blender mixing a rainbow fruit vortex in a warm kitchen",
+        alt: "An open fruit fridge beside a blender mixing a rainbow juice vortex",
       },
     ],
   },
@@ -37,7 +37,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Blendroom — 3D Fruit Blender",
     description:
-      "Drag in fruit and blend it into a colorful contained juice vortex.",
+      "Open the fridge, grab fruit, and press the blender’s red button.",
     images: ["/og.png"],
   },
 };
