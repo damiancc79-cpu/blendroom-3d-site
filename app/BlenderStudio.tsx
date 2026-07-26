@@ -23,6 +23,23 @@ import {
   type MutableRefObject,
 } from "react";
 import * as THREE from "three";
+import {
+  COUNTER_FASCIA_Z,
+  COUNTER_FRONT_TRIGGER_Z,
+  COUNTER_HALF_X,
+  COUNTER_HALF_Z,
+  COUNTER_LIP_DURATION,
+  COUNTER_TOP_CONTACT_Y,
+  COUNTER_TOP_Y,
+  SPILL_AIR,
+  SPILL_COUNTERTOP,
+  SPILL_FASCIA,
+  SPILL_FLOOR,
+  SPILL_LIP,
+  SPILL_PARTICLE_RADIUS,
+  getSpillLipScale,
+  resolveSpillFrontEdge,
+} from "./spill-edge-physics.mjs";
 
 type FruitType = "strawberry" | "banana" | "orange" | "blueberry" | "kiwi";
 
@@ -93,9 +110,7 @@ const CUP_RIM_Y = 1.13;
 const CUP_CAPACITY = 5;
 const POUR_RATE = 1.65;
 const SPILL_RATE = 3.4;
-const COUNTER_TOP_Y = 0.035;
 const MAX_SPILL_PARTICLES = 220;
-const SPILL_PARTICLE_RADIUS = 0.058;
 const FRIDGE_X = -4.15;
 const FRIDGE_Z = -2.2;
 const MAX_FRUIT = 12;
@@ -1214,6 +1229,12 @@ function BlendroomScene({
     new THREE.Vector3(CUP_POSITION.x + 0.42, CUP_RIM_Y, CUP_POSITION.z),
   );
   const spillFlowRef = useRef(0);
+
+  useEffect(() => {
+    streamFlowRef.current = 0;
+    spillFlowRef.current = 0;
+  }, [batchId]);
+
   const activeFruitCount = fruits.filter((fruit) => !fruit.inFridge).length;
   const canTakeFromFridge =
     !dragging && !batchLocked && activeFruitCount < MAX_FRUIT;
@@ -1333,6 +1354,7 @@ function BlendroomScene({
       />
       <CupSpillStream
         color={spilledUnits > 0.001 ? spillColor : cupColor}
+        active={spillMode === "spilling"}
         cupRimWorldRef={cupRimWorldRef}
         flowRef={spillFlowRef}
         reducedMotion={reducedMotion}
@@ -1463,6 +1485,10 @@ function Kitchen() {
       <mesh receiveShadow position={[0, -0.03, 0]}>
         <boxGeometry args={[11, 0.12, 4.92]} />
         <meshStandardMaterial color="#eee5d7" roughness={0.42} />
+      </mesh>
+      <mesh receiveShadow position={[0, -0.03, 2.472]}>
+        <boxGeometry args={[11, 0.12, 0.024]} />
+        <meshStandardMaterial color="#d7c8b5" roughness={0.45} />
       </mesh>
       <mesh castShadow position={[0, -1.35, -0.05]}>
         <boxGeometry args={[10.5, 2.35, 4.5]} />
@@ -2831,11 +2857,13 @@ function CrystalCup({
 
 function CupSpillStream({
   color,
+  active,
   cupRimWorldRef,
   flowRef,
   reducedMotion,
 }: {
   color: string;
+  active: boolean;
   cupRimWorldRef: MutableRefObject<THREE.Vector3>;
   flowRef: MutableRefObject<number>;
   reducedMotion: boolean;
@@ -2856,7 +2884,7 @@ function CupSpillStream({
   useFrame((state) => {
     const mesh = streamRef.current;
     if (!mesh) return;
-    const strength = flowRef.current;
+    const strength = active ? flowRef.current : 0;
     mesh.visible = strength > 0.025;
     if (!mesh.visible) {
       mesh.count = 0;
@@ -2938,8 +2966,20 @@ type SpillFluidState = {
   velocities: Float32Array;
   colors: Float32Array;
   ages: Float32Array;
+  edgeAges: Float32Array;
   surface: Uint8Array;
   emittedByFruit: Map<number, number>;
+};
+
+type SpillEdgeParticle = {
+  phase: number;
+  x: number;
+  y: number;
+  z: number;
+  previousZ: number;
+  velocityZ: number;
+  edgeAge: number;
+  progress?: number;
 };
 
 function spillHashKey(x: number, y: number, z: number) {
@@ -2985,6 +3025,16 @@ function SpillFluidSimulation({
   const mixColor = useMemo(() => new THREE.Color(color), [color]);
   const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
   const velocityDirection = useMemo(() => new THREE.Vector3(), []);
+  const edgeParticleRef = useRef<SpillEdgeParticle>({
+    phase: SPILL_AIR,
+    x: 0,
+    y: 0,
+    z: 0,
+    previousZ: 0,
+    velocityZ: 0,
+    edgeAge: 0,
+  });
+  const lipScaleRef = useRef({ x: 1, y: 1, z: 1 });
   const simRef = useRef<SpillFluidState>({
     count: 0,
     accumulator: 0,
@@ -2995,6 +3045,7 @@ function SpillFluidSimulation({
     velocities: new Float32Array(MAX_SPILL_PARTICLES * 3),
     colors: new Float32Array(MAX_SPILL_PARTICLES * 3),
     ages: new Float32Array(MAX_SPILL_PARTICLES),
+    edgeAges: new Float32Array(MAX_SPILL_PARTICLES),
     surface: new Uint8Array(MAX_SPILL_PARTICLES),
     emittedByFruit: new Map(),
   });
@@ -3054,7 +3105,8 @@ function SpillFluidSimulation({
         sim.colors[offset + 1] = sourceColor.g;
         sim.colors[offset + 2] = sourceColor.b;
         sim.ages[index] = 0;
-        sim.surface[index] = 0;
+        sim.edgeAges[index] = 0;
+        sim.surface[index] = SPILL_AIR;
         sim.frozen = false;
         sim.settledFrames = 0;
         emitted += 1;
@@ -3063,7 +3115,8 @@ function SpillFluidSimulation({
       sim.emittedByFruit.set(source.id, emitted);
     }
 
-    ripple.visible = flowRef.current > 0.035;
+    ripple.visible =
+      spillMode === "spilling" && flowRef.current > 0.035;
     if (ripple.visible) {
       ripple.position.set(
         rim.x,
@@ -3106,6 +3159,29 @@ function SpillFluidSimulation({
           sim.previous[offset] = sim.positions[offset];
           sim.previous[offset + 1] = sim.positions[offset + 1];
           sim.previous[offset + 2] = sim.positions[offset + 2];
+          const contact = sim.surface[index];
+
+          if (contact === SPILL_LIP) {
+            sim.edgeAges[index] = Math.min(
+              COUNTER_LIP_DURATION,
+              sim.edgeAges[index] + fixedDt,
+            );
+            sim.positions[offset] +=
+              sim.velocities[offset] * fixedDt * 0.35;
+            continue;
+          }
+
+          if (contact === SPILL_FASCIA) {
+            sim.velocities[offset] *= 0.985;
+            sim.velocities[offset + 1] -= 4.5 * fixedDt;
+            sim.velocities[offset + 2] = 0;
+            sim.positions[offset] += sim.velocities[offset] * fixedDt;
+            sim.positions[offset + 1] +=
+              sim.velocities[offset + 1] * fixedDt;
+            sim.positions[offset + 2] = COUNTER_FASCIA_Z;
+            continue;
+          }
+
           sim.velocities[offset + 1] -= 8.2 * fixedDt;
           sim.positions[offset] += sim.velocities[offset] * fixedDt;
           sim.positions[offset + 1] +=
@@ -3210,18 +3286,34 @@ function SpillFluidSimulation({
             let y = sim.positions[offset + 1];
             let z = sim.positions[offset + 2];
             const wasSurface = sim.surface[index];
-            const overCounter =
-              Math.abs(x) < 5.5 - SPILL_PARTICLE_RADIUS &&
-              Math.abs(z) < 2.46 - SPILL_PARTICLE_RADIUS;
-            sim.surface[index] = 0;
+            const withinCounterWidth = Math.abs(x) <= COUNTER_HALF_X;
+            const overCounterTop =
+              withinCounterWidth &&
+              z > -COUNTER_HALF_Z &&
+              z < COUNTER_FRONT_TRIGGER_Z;
+            const edgeParticle = edgeParticleRef.current;
+            edgeParticle.phase = wasSurface;
+            edgeParticle.x = x;
+            edgeParticle.y = y;
+            edgeParticle.z = z;
+            edgeParticle.previousZ = sim.previous[offset + 2];
+            edgeParticle.velocityZ = sim.velocities[offset + 2];
+            edgeParticle.edgeAge = sim.edgeAges[index];
+            sim.surface[index] = SPILL_AIR;
 
-            if (
-              overCounter &&
+            if (resolveSpillFrontEdge(edgeParticle)) {
+              x = edgeParticle.x;
+              y = edgeParticle.y;
+              z = edgeParticle.z;
+              sim.edgeAges[index] = edgeParticle.edgeAge;
+              sim.surface[index] = edgeParticle.phase;
+            } else if (
+              overCounterTop &&
               y < COUNTER_TOP_Y + SPILL_PARTICLE_RADIUS
             ) {
-              y = COUNTER_TOP_Y + SPILL_PARTICLE_RADIUS * 0.22;
-              sim.surface[index] = 1;
-              if (wasSurface === 0) {
+              y = COUNTER_TOP_CONTACT_Y;
+              sim.surface[index] = SPILL_COUNTERTOP;
+              if (wasSurface === SPILL_AIR) {
                 const splashAngle = index * 2.399;
                 const splash = 0.012 + (index % 4) * 0.006;
                 x += Math.cos(splashAngle) * splash;
@@ -3248,7 +3340,7 @@ function SpillFluidSimulation({
               y < -2.115 + SPILL_PARTICLE_RADIUS
             ) {
               y = -2.115 + SPILL_PARTICLE_RADIUS * 0.22;
-              sim.surface[index] = 2;
+              sim.surface[index] = SPILL_FLOOR;
             }
 
             sim.positions[offset] = x;
@@ -3268,14 +3360,20 @@ function SpillFluidSimulation({
             (sim.positions[offset + 2] - sim.previous[offset + 2]) /
             fixedDt;
 
-          if (sim.surface[index] === 1) {
+          if (sim.surface[index] === SPILL_COUNTERTOP) {
             sim.velocities[offset] *= 0.976;
             sim.velocities[offset + 1] = 0;
             sim.velocities[offset + 2] *= 0.976;
-          } else if (sim.surface[index] === 2) {
+          } else if (sim.surface[index] === SPILL_FLOOR) {
             sim.velocities[offset] *= 0.9;
             sim.velocities[offset + 1] = 0;
             sim.velocities[offset + 2] *= 0.9;
+          } else if (sim.surface[index] === SPILL_LIP) {
+            sim.velocities[offset] *= 0.96;
+          } else if (sim.surface[index] === SPILL_FASCIA) {
+            sim.velocities[offset] *= 0.94;
+            sim.velocities[offset + 1] *= 0.985;
+            sim.velocities[offset + 2] = 0;
           } else {
             sim.velocities[offset] *= 0.995;
             sim.velocities[offset + 1] *= 0.995;
@@ -3427,7 +3525,10 @@ function SpillFluidSimulation({
         sim.positions[offset + 1],
         sim.positions[offset + 2],
       );
-      if (surface > 0) {
+      if (
+        surface === SPILL_COUNTERTOP ||
+        surface === SPILL_FLOOR
+      ) {
         dummy.quaternion.identity();
         const puddlePulse =
           reducedMotion
@@ -3437,6 +3538,21 @@ function SpillFluidSimulation({
           1.35 * puddlePulse,
           0.2 + (1 - spillFraction) * 0.04,
           1.35 / puddlePulse,
+        );
+      } else if (surface === SPILL_LIP) {
+        dummy.quaternion.identity();
+        const lipScale = getSpillLipScale(
+          sim.edgeAges[index],
+          lipScaleRef.current,
+        );
+        dummy.scale.set(lipScale.x, lipScale.y, lipScale.z);
+      } else if (surface === SPILL_FASCIA) {
+        dummy.quaternion.identity();
+        dummy.scale.set(
+          0.9,
+          1.5 +
+            Math.min(0.75, Math.abs(sim.velocities[offset + 1]) * 0.16),
+          0.42,
         );
       } else {
         velocityDirection.set(
@@ -3496,7 +3612,8 @@ function SpillFluidSimulation({
         <meshPhysicalMaterial
           vertexColors
           transparent
-          opacity={0.84}
+          opacity={0.9}
+          depthTest
           roughness={0.14}
           clearcoat={0.72}
           clearcoatRoughness={0.16}
